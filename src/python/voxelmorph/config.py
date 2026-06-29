@@ -7,3 +7,11 @@ def default_unet_features():
         [16, 32, 32, 32],
         [32, 32, 32, 32, 32, 16, 16],
     ]
+
+
+def compact_unet_features():
+    """Lightweight U-Net (~4× fewer params) for faster PIFReg test-time optimization."""
+    return [
+        [8, 16, 16, 16],
+        [16, 16, 16, 16, 16, 8, 8],
+    ]

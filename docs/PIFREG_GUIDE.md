@@ -132,6 +132,7 @@ warped = register_pifreg(
     lr_min=1e-6,
     save_model_path=None, # 可选：保存最后一尺度模型 .pt
     model_path=None,      # 可选：加载预训练 VxmDense（一般不用）
+    fast_mode=False,      # True: 轻量 U-Net + 加速位移场更新
 )
 ```
 
@@ -198,10 +199,23 @@ lr_schedule='cosine'
 
 ### 6.2 调参方向
 
+**`fast_mode=True` 预设（2026-06 新增）**
+
+| 项 | 默认 | fast_mode |
+|----|------|-----------|
+| U-Net 通道 | `[16,32,32,32]` / ~109k 参数 | `[8,16,16,16]` / ~28k 参数 |
+| `int_steps` | 7 | 3 |
+| `lr` | 1e-4 | 2e-4 |
+| `lamda` | 0.01 | 0.005 |
+| `scales` | (0.25, 0.5, 1.0) | (0.5, 1.0) |
+| `patience` | 100 | 80 |
+
+目的：更少参数、更高学习率、更低平滑约束 → 每 epoch 更快、位移场更新更激进。需与默认模式对比 MI/NCC/NTG。
+
 | 目标 | 建议 |
 |------|------|
 | 更高精度 | 增大 `epochs`，增大 `patience`，`multiscale=True`，`affine_init=True` |
-| 更快速度 | `scales=(0.5, 1.0)`；`multiscale=False` + Elastix 预对齐；`int_steps=3`；`epochs=1000, patience=60` |
+| 更快速度 | `fast_mode=True`（推荐先试）；或 `scales=(0.5, 1.0)`；`multiscale=False` + Elastix 预对齐；`int_steps=3`；`epochs=1000, patience=60` |
 | 跨波段 | `histogram_match=True`，`image_loss='ncc'` |
 | 学习率 | 收敛后期慢 → 试 `lr_schedule='plateau'`；或略增 `lr=2e-4` |
 | 位移幅度 | 减小 `lamda`（如 0.005）允许更大形变；过大则不稳定 |

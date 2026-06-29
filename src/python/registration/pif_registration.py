@@ -11,7 +11,7 @@ from skimage.exposure import match_histograms
 
 from ..losses.registration_losses import NCC, Grad
 from ..voxelmorph import VxmDense
-from ..voxelmorph.config import default_unet_features
+from ..voxelmorph.config import compact_unet_features, default_unet_features
 from ..voxelmorph.layers import SpatialTransformer
 from ..voxelmorph.losses import MSE
 
@@ -65,12 +65,14 @@ def _apply_flow_to_image(moving_image, flow, device):
     return warped.squeeze().cpu().numpy().astype(np.float32)
 
 
-def _build_flow_model(inshape, device, model_path=None, int_steps=7, int_downsize=2):
+def _build_flow_model(
+    inshape, device, model_path=None, int_steps=7, int_downsize=2, nb_unet_features=None,
+):
     """创建或加载 U-Net 位移场预测模型（VxmDense 仅作网络 backbone）。"""
     if model_path:
         model = VxmDense.load(model_path, device)
     else:
-        enc_nf, dec_nf = default_unet_features()
+        enc_nf, dec_nf = nb_unet_features or default_unet_features()
         model = VxmDense(
             inshape=inshape,
             nb_unet_features=[enc_nf, dec_nf],
@@ -128,6 +130,7 @@ def _train_at_scale(
     int_downsize,
     image_loss,
     model_path=None,
+    nb_unet_features=None,
     early_stop=True,
     patience=100,
     min_delta=1e-5,
@@ -144,6 +147,7 @@ def _train_at_scale(
     model = _build_flow_model(
         inshape, device, model_path=model_path,
         int_steps=int_steps, int_downsize=int_downsize,
+        nb_unet_features=nb_unet_features,
     )
 
     if image_loss == 'ncc':
@@ -236,6 +240,7 @@ def _register_multiscale(
     lr_gamma,
     lr_min,
     save_model_path=None,
+    nb_unet_features=None,
 ):
     """多尺度配准：各尺度下采样优化，位移场上采样组合，最终对原图 warp 一次。"""
     h, w = fixed_original.shape
@@ -266,6 +271,7 @@ def _register_multiscale(
         model, flow_delta = _train_at_scale(
             f_s, m_s, device, max_epochs_per_scale, lr, lamda,
             int_steps, int_downsize, image_loss,
+            nb_unet_features=nb_unet_features,
             early_stop=early_stop, patience=patience, min_delta=min_delta,
             lr_schedule=lr_schedule, lr_gamma=lr_gamma, lr_min=lr_min,
             verbose=True,
@@ -295,6 +301,7 @@ def register_pifreg(
     model_path=None,
     int_steps=7,
     int_downsize=2,
+    nb_unet_features=None,
     image_loss='ncc',
     save_model_path=None,
     affine_init=True,
@@ -307,6 +314,7 @@ def register_pifreg(
     lr_schedule='cosine',
     lr_gamma=0.5,
     lr_min=1e-6,
+    fast_mode=False,
 ):
     """
     PIFReg（Pyramid Instance Flow Registration）金字塔实例流配准。
@@ -319,6 +327,10 @@ def register_pifreg(
         lr: Adam 初始学习率
         epochs: 单尺度最大 epoch；多尺度时为**每个金字塔层级**的最大 epoch
         lamda: 位移场平滑正则权重
+        nb_unet_features: U-Net 通道配置 [enc_nf, dec_nf]；None 用默认 [16,32,...]
+        fast_mode: 加速模式 — 轻量 U-Net、更高 lr、更低 lamda、更少积分步数、
+                   两尺度金字塔 (0.5, 1.0)。与 fast_mode 同传的 lr/lamda/int_steps 等
+                   仍会被 fast_mode 覆盖；需细调时请设 fast_mode=False 并手动传参
         early_stop: 是否启用早停（推荐 True，可设大 epochs 让模型充分收敛）
         patience: 早停耐心值（连续多少 epoch 无改善则停止该尺度）
         min_delta: 判定 loss 改善的最小幅度
@@ -330,6 +342,19 @@ def register_pifreg(
     返回:
         warped_image: 配准后的移动图像（原分辨率，仅一次 warp）
     """
+    if fast_mode:
+        nb_unet_features = nb_unet_features or compact_unet_features()
+        int_steps = 3
+        int_downsize = 2
+        lr = 2e-4
+        lamda = 0.005
+        scales = (0.25, 0.5, 1.0)
+        patience = 80
+        print(
+            f'{METHOD_NAME}: fast_mode — compact U-Net, int_steps=3, '
+            f'lr={lr}, lamda={lamda}, scales={scales}'
+        )
+
     device = _resolve_device(device)
     h, w = fixed_image.shape
 
@@ -354,6 +379,7 @@ def register_pifreg(
         return _register_multiscale(
             fixed_original, moving_original, device, epochs, lr, lamda,
             int_steps, int_downsize, image_loss, scales, save_model_path=save_model_path,
+            nb_unet_features=nb_unet_features,
             **train_kwargs,
         )
 
@@ -361,7 +387,8 @@ def register_pifreg(
     model, flow = _train_at_scale(
         fixed, moving, device, epochs, lr, lamda,
         int_steps, int_downsize, image_loss,
-        model_path=model_path, verbose=True, **train_kwargs,
+        model_path=model_path, nb_unet_features=nb_unet_features,
+        verbose=True, **train_kwargs,
     )
     warped = _apply_flow_to_image(moving_original, flow, device)
     if save_model_path:

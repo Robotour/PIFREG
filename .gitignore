@@ -1,28 +1,14 @@
-# ===== 数据与本地大文件（不上传） =====
+# ===== 数据与输出（不上传） =====
 data/
 models/
 outputs/
 0_reference/
 All code/
 
-# ===== 非 PIFReg 代码（本地保留，不进 Git） =====
-src/python/registration/methods.py
-src/python/vendor/
-src/matlab/
-src/python/experiments/run_registration_exp.py
-src/python/experiments/run_groupwise_registration_exp.py
-src/python/experiments/compare_pyelastix.py
-src/python/experiments/train_voxelmorph.py
-src/python/preprocessing/
-src/python/networks/registration_networks.py
-src/python/networks/registration_networks_discriminator.py
-
-# ===== 旧文档 =====
-PROJECT_DOCUMENTATION.md
-VOXELMORPH_OPTIMIZATION_GUIDE.md
-docs/PYELASTIX_GUIDE.md
-docs/VOXELMORPH_OPTIMIZATION_GUIDE.md
-HSI2RGB20240517.xlsx
+# ===== 本地副本 / 非代码资产 =====
+run_pifreg/
+*.docx
+*.xlsx
 
 # ===== Python / IDE =====
 __pycache__/

@@ -54,6 +54,7 @@ def main():
     parser.add_argument("--moving", required=True, help="Moving image path")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--epochs", type=int, default=3000)
+    parser.add_argument("--fast-mode", action="store_true", help="Compact U-Net + faster flow updates")
     parser.add_argument("--no-multiscale", action="store_true")
     parser.add_argument("--no-show", action="store_true")
     args = parser.parse_args()
@@ -70,6 +71,7 @@ def main():
         early_stop=True,
         patience=120,
         lr_schedule="cosine",
+        fast_mode=args.fast_mode,
     )
 
     print(f"MI:  {compute_MI(fixed, moving):.4f} -> {compute_MI(fixed, warped):.4f}")

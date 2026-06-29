@@ -2,5 +2,7 @@ numpy
 torch
 opencv-python
 scikit-image
-pystackreg
+scipy
 matplotlib
+pystackreg
+SimpleITK
