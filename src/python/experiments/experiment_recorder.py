@@ -357,34 +357,50 @@ def write_summary_md(
     metrics_summary: Dict,
     elapsed_seconds: float,
     output_paths: Optional[Dict[str, str]] = None,
+    title: Optional[str] = None,
+    extra_sections: Optional[List[str]] = None,
 ) -> Path:
     """生成人类可读的实验摘要 Markdown。"""
+    exp_label = config.get("experiment", "registration")
     lines = [
-        "# PIFReg StackFlow Experiment Summary",
+        f"# {title or exp_label} — Experiment Summary",
         "",
         f"- **Run directory**: `{run_dir.name}`",
+        f"- **Method**: `{exp_label}`",
+        f"- **Exp name**: `{config.get('exp_name', 'run')}`",
         f"- **Created**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- **Elapsed**: {elapsed_seconds:.1f}s ({elapsed_seconds / 60:.1f} min)",
         "",
         "## Data",
         "",
-        f"- Stack: `{config.get('stack_dir', 'N/A')}`",
-        f"- Bands: {config.get('num_bands', 'N/A')}",
-        f"- Image size: {config.get('image_size', 'N/A')}",
-        f"- Anchor band: {config.get('anchor_band', 'N/A')}",
-        f"- Eval ref band: {config.get('eval_ref_band', 'N/A')}",
-        "",
-        "## Hyperparameters",
-        "",
     ]
+    if "stack_dir" in config:
+        lines.extend([
+            f"- Stack: `{config.get('stack_dir', 'N/A')}`",
+            f"- Bands: {config.get('num_bands', 'N/A')}",
+            f"- Image size: {config.get('image_size', 'N/A')}",
+        ])
+    if "fixed_image" in config:
+        lines.append(f"- Fixed: `{config['fixed_image']}`")
+    if "moving_image" in config:
+        lines.append(f"- Moving: `{config['moving_image']}`")
+    if config.get("anchor_band") is not None:
+        lines.append(f"- Anchor band: {config['anchor_band']}")
+    if config.get("eval_ref_band") is not None:
+        lines.append(f"- Eval ref band: {config['eval_ref_band']}")
 
     reg = config.get("registration", {})
-    for key in sorted(reg.keys()):
-        lines.append(f"- `{key}`: {reg[key]}")
+    if reg:
+        lines.extend(["", "## Hyperparameters", ""])
+        for key in sorted(reg.keys()):
+            lines.append(f"- `{key}`: {reg[key]}")
+
+    if extra_sections:
+        lines.extend(extra_sections)
 
     lines.extend([
         "",
-        "## Mean Metrics (vs reference band)",
+        "## Mean Metrics",
         "",
         "| Metric | Before | After | Delta |",
         "|--------|--------|-------|-------|",
@@ -404,7 +420,69 @@ def write_summary_md(
     return path
 
 
-def record_stackflow_experiment(
+def describe_joint_architecture(image_size, num_bands, ref_band_idx=None, fast_mode=True) -> str:
+    h, w = image_size
+    enc_nf, dec_nf = compact_unet_features() if fast_mode else default_unet_features()
+    ref = ref_band_idx if ref_band_idx is not None else "auto (middle)"
+    return "\n".join([
+        "PIFReg Joint Groupwise — Shared Flow",
+        "=" * 50,
+        "",
+        "Backbone: VoxelMorph 2D U-Net",
+        f"Input: stack variance (1,1,H,W) + ref band {ref} (1,1,H,W) → 2 channels",
+        f"U-Net inshape=({h}, {w})",
+        f"  encoder: {enc_nf}, decoder: {dec_nf}",
+        "Output: single shared 2D flow (1, 2, H, W) applied to ALL bands",
+        "Loss: stack variance minimization + flow smoothness",
+    ])
+
+
+def describe_chain_architecture(num_bands, descending=True) -> str:
+    direction = "high→low wavelength" if descending else "low→high wavelength"
+    return "\n".join([
+        "PIFReg Chain Groupwise",
+        "=" * 50,
+        "",
+        f"Bands: {num_bands}",
+        f"Chain direction: {direction}",
+        "Method: N-1 independent pairwise PIFReg steps",
+        "Each step: VoxelMorph U-Net pairwise registration",
+        "Loss per step: NCC + smoothness (test-time optimization)",
+        "Primary metric: mean adjacent-band NCC along chain",
+    ])
+
+
+def describe_stackflow3d_architecture(image_size, num_bands, anchor_band_idx=0, fast_mode=True) -> str:
+    h, w = image_size
+    return "\n".join([
+        "PIFReg StackFlow3D — Scheme A",
+        "=" * 50,
+        "",
+        f"Input: full stack as 3D volume (1, 1, {num_bands}, {h}, {w})",
+        "Backbone: 3D U-Net (VoxelMorph-style)",
+        f"Output: per-band 2D flows (1, {num_bands}, 2, H, W), anchor={anchor_band_idx} fixed",
+        "Warp: 2D SpatialTransformer per band",
+        "Loss: sequential pairwise NCC mean + per-flow smoothness",
+    ])
+
+
+def describe_pairwise_architecture(image_size, fast_mode=False, multiscale=True) -> str:
+    h, w = image_size
+    enc_nf, dec_nf = compact_unet_features() if fast_mode else default_unet_features()
+    return "\n".join([
+        "PIFReg Pairwise Registration",
+        "=" * 50,
+        "",
+        "Backbone: VxmDense (VoxelMorph 2D U-Net)",
+        f"Input: fixed + moving concat → (1, 2, {h}, {w})",
+        f"  encoder: {enc_nf}, decoder: {dec_nf}",
+        f"Multiscale pyramid: {multiscale}",
+        "Affine init: StackReg + optional histogram matching",
+        "Loss: NCC + flow smoothness (test-time optimization)",
+    ])
+
+
+def record_groupwise_experiment(
     run_dir: Path,
     config: Dict[str, Any],
     architecture_text: str,
@@ -421,11 +499,13 @@ def record_stackflow_experiment(
     moving_band_indices: Optional[Sequence[int]] = None,
     anchor_band_idx: int = 0,
     save_before_bands: bool = True,
+    rgb_title_after: str = "RGB After Registration",
+    summary_extra_sections: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    一次性写入完整实验记录，返回各输出路径索引。
+    群组配准实验标准记录（所有 groupwise 脚本共用）。
 
-    bands_raw_* : 原图强度（配准位移施加于原图后的结果用于保存）。
+    bands_raw_* : 原图强度；若方法无位移场回传，after 可为配准管线直接输出。
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -435,7 +515,7 @@ def record_stackflow_experiment(
     save_timing(run_dir, elapsed_seconds)
 
     metric_paths = save_metrics_bundle(run_dir, metrics_before, metrics_after, metrics_summary)
-    image_paths = save_rgb_outputs(run_dir, rgb_before, rgb_after)
+    image_paths = save_rgb_outputs(run_dir, rgb_before, rgb_after, title_after=rgb_title_after)
     band_paths = save_band_stacks(
         run_dir, bands_raw_before, bands_raw_after, band_files, save_before=save_before_bands
     )
@@ -445,7 +525,6 @@ def record_stackflow_experiment(
         "config": rel(run_dir / "config.json"),
         "architecture": rel(run_dir / "architecture.txt"),
         "timing": rel(run_dir / "timing.json"),
-        "summary": "summary.md",
         "metrics_before": rel(metric_paths["before"]),
         "metrics_after": rel(metric_paths["after"]),
         "metrics_summary": rel(metric_paths["summary"]),
@@ -469,14 +548,99 @@ def record_stackflow_experiment(
         output_index["flows_magnitude_dir"] = rel(flow_paths["magnitude_dir"])
 
     summary_path = write_summary_md(
-        run_dir, config, metrics_summary, elapsed_seconds, output_index
+        run_dir, config, metrics_summary, elapsed_seconds, output_index,
+        extra_sections=summary_extra_sections,
     )
     output_index["summary_md"] = rel(summary_path)
 
     manifest = {
         "run_dir": str(run_dir),
         "run_name": run_dir.name,
+        "experiment": config.get("experiment"),
+        "exp_name": config.get("exp_name"),
+        "metrics_summary": metrics_summary,
         "outputs": output_index,
     }
     save_json(run_dir / "manifest.json", manifest)
     return manifest
+
+
+def record_pairwise_experiment(
+    run_dir: Path,
+    config: Dict[str, Any],
+    architecture_text: str,
+    fixed_raw: np.ndarray,
+    moving_raw: np.ndarray,
+    warped_raw: np.ndarray,
+    metrics_before: Dict,
+    metrics_after: Dict,
+    metrics_summary: Dict,
+    elapsed_seconds: float,
+    flow: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Pairwise PIFReg 实验记录。"""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    save_config(run_dir, config)
+    save_architecture(run_dir, architecture_text)
+    save_timing(run_dir, elapsed_seconds)
+    save_metrics_bundle(run_dir, metrics_before, metrics_after, metrics_summary)
+
+    images_dir = run_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(images_dir / "fixed.png"), _band_to_uint8(fixed_raw))
+    cv2.imwrite(str(images_dir / "moving.png"), _band_to_uint8(moving_raw))
+    cv2.imwrite(str(images_dir / "warped.png"), _band_to_uint8(warped_raw))
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    for ax, img, title in zip(
+        axes,
+        [fixed_raw, moving_raw, warped_raw],
+        ["Fixed", "Moving", "Warped"],
+    ):
+        ax.imshow(_band_to_uint8(img), cmap="gray")
+        ax.set_title(title)
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(images_dir / "compare.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+    rel = lambda p: str(p.relative_to(run_dir))  # noqa: E731
+    output_index = {
+        "config": rel(run_dir / "config.json"),
+        "architecture": rel(run_dir / "architecture.txt"),
+        "timing": rel(run_dir / "timing.json"),
+        "metrics_summary": rel(run_dir / "metrics" / "summary.json"),
+        "fixed": rel(images_dir / "fixed.png"),
+        "moving": rel(images_dir / "moving.png"),
+        "warped": rel(images_dir / "warped.png"),
+        "compare": rel(images_dir / "compare.png"),
+    }
+    if flow is not None and flow.size > 0:
+        flows_dir = run_dir / "flows"
+        flows_dir.mkdir(parents=True, exist_ok=True)
+        np.save(flows_dir / "flow.npy", flow.astype(np.float32))
+        cv2.imwrite(
+            str(flows_dir / "flow_color.png"),
+            cv2.cvtColor(flow_to_color_image(flow), cv2.COLOR_RGB2BGR),
+        )
+        cv2.imwrite(str(flows_dir / "flow_magnitude.png"), flow_magnitude_image(flow))
+        output_index["flow_npy"] = rel(flows_dir / "flow.npy")
+
+    write_summary_md(run_dir, config, metrics_summary, elapsed_seconds, output_index)
+    output_index["summary_md"] = "summary.md"
+    manifest = {
+        "run_dir": str(run_dir),
+        "run_name": run_dir.name,
+        "experiment": config.get("experiment"),
+        "exp_name": config.get("exp_name"),
+        "metrics_summary": metrics_summary,
+        "outputs": output_index,
+    }
+    save_json(run_dir / "manifest.json", manifest)
+    return manifest
+
+
+# 向后兼容
+record_stackflow_experiment = record_groupwise_experiment

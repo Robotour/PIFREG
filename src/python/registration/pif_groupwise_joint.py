@@ -327,7 +327,7 @@ def register_pifreg_groupwise_joint(
     bands = _as_band_list(img_list)
     n = len(bands)
     if n <= 1:
-        return bands, {'mode': 'joint', 'num_bands': n}
+        return bands, {'mode': 'joint', 'num_bands': n}, np.zeros((2, 0, 0), dtype=np.float32)
 
     if fast_mode:
         nb_unet_features = nb_unet_features or compact_unet_features()
@@ -389,6 +389,7 @@ def register_pifreg_groupwise_joint(
     warped_t = _warp_stack_with_flow(stack_orig, flow_full, (h, w))
     registered = _tensor_to_bands(warped_t)
 
+    flow_np = flow_full.squeeze().detach().cpu().numpy().astype(np.float32)
     info = {
         'mode': 'joint',
         'method': METHOD_FULL_NAME,
@@ -396,9 +397,10 @@ def register_pifreg_groupwise_joint(
         'ref_band_idx': ref_band_idx,
         'scales': list(active),
         'shared_flow': True,
+        'flow_shape': list(flow_np.shape),
         'loss': 'spectral_variance + mean_ncc + grad',
         'var_weight': var_weight,
         'ncc_weight': ncc_weight,
         'fast_mode': fast_mode,
     }
-    return registered, info
+    return registered, info, flow_np

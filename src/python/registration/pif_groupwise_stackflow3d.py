@@ -383,7 +383,7 @@ def register_pifreg_groupwise_stackflow3d(
     bands = _as_band_list(img_list)
     n = len(bands)
     if n <= 1:
-        return bands, {'mode': 'stackflow3d', 'num_bands': n}
+        return bands, {'mode': 'stackflow3d', 'num_bands': n}, np.zeros((0, 2, 0, 0), dtype=np.float32)
 
     if fast_mode:
         nb_unet_features = nb_unet_features or compact_unet_features()
@@ -446,6 +446,9 @@ def register_pifreg_groupwise_stackflow3d(
     warped_t = _warp_stack_band_flows(stack_orig, flow_vol_full, anchor_band_idx, (h, w))
     registered = _tensor_to_bands(warped_t)
 
+    flow_np = flow_vol_full.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    moving_idx = [i for i in range(n) if i != anchor_band_idx]
+    flow_stack_np = flow_np[moving_idx]
     info = {
         'mode': 'stackflow3d',
         'scheme': 'A',
@@ -453,6 +456,8 @@ def register_pifreg_groupwise_stackflow3d(
         'num_bands': n,
         'num_flow_fields': n - 1,
         'anchor_band_idx': anchor_band_idx,
+        'moving_band_indices': moving_idx,
+        'flow_stack_shape': list(flow_stack_np.shape),
         'pyramid_levels': [list(lv) for lv in levels],
         'epochs_per_level': ep_levels[: len(levels)],
         'network': 'SpectralStackUnet3d (anisotropic pool 1x2x2)',
@@ -462,4 +467,4 @@ def register_pifreg_groupwise_stackflow3d(
         'ncc_weight': ncc_weight,
         'fast_mode': fast_mode,
     }
-    return registered, info
+    return registered, info, flow_stack_np

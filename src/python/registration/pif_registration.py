@@ -288,7 +288,11 @@ def _register_multiscale(
 
     if save_model_path and model is not None:
         model.save(save_model_path)
-    return warped
+    return warped, flow_full
+
+
+def _flow_tensor_to_numpy(flow) -> np.ndarray:
+    return flow.squeeze().detach().cpu().numpy().astype(np.float32)
 
 
 def register_pifreg(
@@ -315,6 +319,7 @@ def register_pifreg(
     lr_gamma=0.5,
     lr_min=1e-6,
     fast_mode=False,
+    return_flow=False,
 ):
     """
     PIFReg（Pyramid Instance Flow Registration）金字塔实例流配准。
@@ -341,6 +346,7 @@ def register_pifreg(
 
     返回:
         warped_image: 配准后的移动图像（原分辨率，仅一次 warp）
+        若 return_flow=True: (warped_image, flow_np) 其中 flow_np 为 (2, H, W)
     """
     if fast_mode:
         nb_unet_features = nb_unet_features or compact_unet_features()
@@ -376,12 +382,15 @@ def register_pifreg(
     )
 
     if multiscale and model_path is None:
-        return _register_multiscale(
+        warped, flow_full = _register_multiscale(
             fixed_original, moving_original, device, epochs, lr, lamda,
             int_steps, int_downsize, image_loss, scales, save_model_path=save_model_path,
             nb_unet_features=nb_unet_features,
             **train_kwargs,
         )
+        if return_flow:
+            return warped, _flow_tensor_to_numpy(flow_full)
+        return warped
 
     print(f'{METHOD_NAME}: single scale {h}x{w}, up to {epochs} epochs')
     model, flow = _train_at_scale(
@@ -393,4 +402,6 @@ def register_pifreg(
     warped = _apply_flow_to_image(moving_original, flow, device)
     if save_model_path:
         model.save(save_model_path)
+    if return_flow:
+        return warped, _flow_tensor_to_numpy(flow)
     return warped

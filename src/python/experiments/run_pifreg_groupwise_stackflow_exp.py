@@ -9,23 +9,26 @@ PIFReg Per-Band StackFlow 群组配准实验
 import argparse
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import cv2
-import numpy as np
 import torch
 
+from src.python.experiments.experiment_data import (
+    build_groupwise_config,
+    compare_metrics,
+    evaluate_stack,
+    load_hsi_stack,
+    resolve_path,
+)
 from src.python.experiments.experiment_recorder import (
     create_run_dir,
     describe_stackflow_architecture,
-    record_stackflow_experiment,
+    record_groupwise_experiment,
 )
-from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
 from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.pif_groupwise_stackflow import (
     DEFAULT_EPOCHS_PER_LEVEL,
@@ -45,118 +48,7 @@ DEFAULT_STACK_DIR = (
     PROJECT_ROOT / "All code" / "cut_images_all" / "2024-06-25_10-12-29-white"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "pifreg_groupwise_stackflow"
-
-
-def resolve_path(path):
-    candidate = Path(path)
-    if candidate.exists():
-        return candidate.resolve()
-    for base in (PROJECT_ROOT, DATA_DIR, PROJECT_ROOT / "All code"):
-        resolved = base / candidate
-        if resolved.exists():
-            return resolved.resolve()
-    raise FileNotFoundError(f"Path not found: {path}")
-
-
-def sort_band_files(folder):
-    files = list(Path(folder).glob("*.jpeg")) + list(Path(folder).glob("*.jpg"))
-    if not files:
-        raise FileNotFoundError(f"No jpeg images found in {folder}")
-
-    def band_key(path):
-        try:
-            return int(path.stem)
-        except ValueError:
-            return path.stem
-
-    return sorted(files, key=band_key)
-
-
-def load_hsi_stack(folder, image_size=(512, 512)):
-    """加载高光谱栈：返回归一化波段（用于配准/指标）与原图强度（用于保存）。"""
-    band_files = sort_band_files(folder)
-    bands_norm = []
-    bands_raw = []
-    for path in band_files:
-        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise ValueError(f"Failed to read image: {path}")
-        img = img.astype(np.float32)
-        if image_size is not None:
-            img = cv2.resize(img, image_size)
-        bands_raw.append(img.copy())
-        lo, hi = float(np.min(img)), float(np.max(img))
-        if hi > lo:
-            img = (img - lo) / (hi - lo)
-        bands_norm.append(img)
-    return bands_norm, bands_raw, band_files
-
-
-def evaluate_stack(bands, ref_idx):
-    ref = bands[ref_idx]
-    metrics = {"ref_band_index": ref_idx, "per_band": [], "mean": {}}
-    keys = ("MI", "NMI", "NCC", "NTG")
-    sums = {k: 0.0 for k in keys}
-    for i, band in enumerate(bands):
-        if i == ref_idx:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, ref)),
-                "NMI": float(compute_NMI(ref, ref)),
-                "NCC": float(compute_NCC(ref, ref)),
-                "NTG": float(compute_NTG(ref, ref)),
-            }
-        else:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, band)),
-                "NMI": float(compute_NMI(ref, band)),
-                "NCC": float(compute_NCC(ref, band)),
-                "NTG": float(compute_NTG(ref, band)),
-            }
-        metrics["per_band"].append(row)
-        for k in keys:
-            sums[k] += row[k]
-    n = len(bands)
-    for k in keys:
-        metrics["mean"][k] = sums[k] / n
-    return metrics
-
-
-def compare_metrics(before, after):
-    summary = {}
-    for key in ("MI", "NMI", "NCC", "NTG"):
-        b, a = before["mean"][key], after["mean"][key]
-        summary[key] = {"before": b, "after": a, "delta": a - b}
-    return summary
-
-
-def build_experiment_config(
-    stack_dir,
-    image_size,
-    device,
-    anchor_band,
-    eval_ref_band_idx,
-    spectral_path,
-    registration_kwargs,
-    n_bands,
-    band_files,
-    exp_name,
-):
-    return {
-        "experiment": "pifreg_groupwise_stackflow",
-        "exp_name": exp_name,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "stack_dir": str(stack_dir),
-        "spectral_path": str(spectral_path),
-        "num_bands": n_bands,
-        "wavelength_range_nm": [band_files[0].stem, band_files[-1].stem],
-        "image_size": list(image_size),
-        "device": str(device),
-        "anchor_band": anchor_band,
-        "eval_ref_band": eval_ref_band_idx,
-        "registration": registration_kwargs,
-    }
+EXPERIMENT_ID = "pifreg_groupwise_stackflow"
 
 
 def run_experiment(
@@ -187,10 +79,10 @@ def run_experiment(
     spectral_enc_channels=DEFAULT_SPECTRAL_ENC_CHANNELS,
     spectral_enc_kernel=DEFAULT_SPECTRAL_ENC_KERNEL,
 ):
-    stack_dir = resolve_path(stack_dir)
+    stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR, PROJECT_ROOT / "All code"])
     base_output = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
     run_dir = create_run_dir(base_output, exp_name=exp_name)
-    spectral_path = resolve_path(spectral_path or DEFAULT_SPECTRAL_PATH)
+    spectral_path = resolve_path(spectral_path or DEFAULT_SPECTRAL_PATH, PROJECT_ROOT, [DATA_DIR])
     device = torch.device(device if torch.cuda.is_available() else "cpu")
 
     pyramid_sizes = tuple(pyramid_sizes or DEFAULT_PYRAMID_SIZES)
@@ -242,9 +134,10 @@ def run_experiment(
     if eval_ref_band_idx is None:
         eval_ref_band_idx = n_bands // 2
 
-    config = build_experiment_config(
-        stack_dir, image_size, device, anchor_band, eval_ref_band_idx,
-        spectral_path, registration_kwargs, n_bands, band_files, exp_name,
+    config = build_groupwise_config(
+        EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
+        band_files, eval_ref_band_idx, spectral_path, registration_kwargs,
+        anchor_band=anchor_band,
     )
 
     architecture_text = describe_stackflow_architecture(
@@ -302,7 +195,7 @@ def run_experiment(
     rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
     rgb_after = hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path))
 
-    manifest = record_stackflow_experiment(
+    manifest = record_groupwise_experiment(
         run_dir=run_dir,
         config=config,
         architecture_text=architecture_text,

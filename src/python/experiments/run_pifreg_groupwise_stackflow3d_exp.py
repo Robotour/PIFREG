@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""
-PIFReg StackFlow3D 群组配准实验（架构文档方案 A）
-
-3D U-Net 读入 (1,1,N,H,W) 全栈，输出 per-band 2D flow，链式 NCC 损失。
-与 2D StackFlow 对比实验用；评价流程与 groupwise 实验一致。
-"""
+"""PIFReg StackFlow3D 群组配准实验 — 标准实验记录。"""
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -16,227 +10,119 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
 
-from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
+from src.python.experiments.experiment_data import (
+    build_groupwise_config,
+    compare_metrics,
+    evaluate_stack,
+    load_hsi_stack,
+    resolve_path,
+)
+from src.python.experiments.experiment_recorder import (
+    create_run_dir,
+    describe_stackflow3d_architecture,
+    record_groupwise_experiment,
+)
 from src.python.preprocessing import hsi_to_rgb
+from src.python.registration.pif_groupwise_stackflow import warp_bands_with_flow_stack
 from src.python.registration.pif_groupwise_stackflow3d import register_pifreg_groupwise_stackflow3d
 
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_SPECTRAL_PATH = PROJECT_ROOT / "HSI2RGB20240517.xlsx"
-DEFAULT_STACK_DIR = (
-    PROJECT_ROOT / "All code" / "cut_images_all" / "2024-06-25_10-12-29-white"
-)
+DEFAULT_STACK_DIR = PROJECT_ROOT / "All code" / "cut_images_all" / "2024-06-25_10-12-29-white"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "pifreg_groupwise_stackflow3d"
-
-
-def resolve_path(path):
-    candidate = Path(path)
-    if candidate.exists():
-        return candidate.resolve()
-    for base in (PROJECT_ROOT, DATA_DIR, PROJECT_ROOT / "All code"):
-        resolved = base / candidate
-        if resolved.exists():
-            return resolved.resolve()
-    raise FileNotFoundError(f"Path not found: {path}")
-
-
-def sort_band_files(folder):
-    files = list(Path(folder).glob("*.jpeg")) + list(Path(folder).glob("*.jpg"))
-    if not files:
-        raise FileNotFoundError(f"No jpeg images found in {folder}")
-
-    def band_key(path):
-        try:
-            return int(path.stem)
-        except ValueError:
-            return path.stem
-
-    return sorted(files, key=band_key)
-
-
-def load_hsi_stack(folder, image_size=(512, 512)):
-    band_files = sort_band_files(folder)
-    bands = []
-    for path in band_files:
-        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise ValueError(f"Failed to read image: {path}")
-        img = img.astype(np.float32)
-        if image_size is not None:
-            img = cv2.resize(img, image_size)
-        lo, hi = float(np.min(img)), float(np.max(img))
-        if hi > lo:
-            img = (img - lo) / (hi - lo)
-        bands.append(img)
-    return bands, band_files
-
-
-def evaluate_stack(bands, ref_idx):
-    ref = bands[ref_idx]
-    metrics = {"ref_band_index": ref_idx, "per_band": [], "mean": {}}
-    keys = ("MI", "NMI", "NCC", "NTG")
-    sums = {k: 0.0 for k in keys}
-    for i, band in enumerate(bands):
-        if i == ref_idx:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, ref)),
-                "NMI": float(compute_NMI(ref, ref)),
-                "NCC": float(compute_NCC(ref, ref)),
-                "NTG": float(compute_NTG(ref, ref)),
-            }
-        else:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, band)),
-                "NMI": float(compute_NMI(ref, band)),
-                "NCC": float(compute_NCC(ref, band)),
-                "NTG": float(compute_NTG(ref, band)),
-            }
-        metrics["per_band"].append(row)
-        for k in keys:
-            sums[k] += row[k]
-    n = len(bands)
-    for k in keys:
-        metrics["mean"][k] = sums[k] / n
-    return metrics
-
-
-def compare_metrics(before, after):
-    summary = {}
-    for key in ("MI", "NMI", "NCC", "NTG"):
-        b, a = before["mean"][key], after["mean"][key]
-        summary[key] = {"before": b, "after": a, "delta": a - b}
-    return summary
-
-
-def save_rgb_comparison(rgb_before, rgb_after, output_path):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    axes[0].imshow(rgb_before)
-    axes[0].set_title("RGB Before Registration")
-    axes[0].axis("off")
-    axes[1].imshow(rgb_after)
-    axes[1].set_title("RGB After PIFReg StackFlow3D (Scheme A)")
-    axes[1].axis("off")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+EXPERIMENT_ID = "pifreg_groupwise_stackflow3d"
 
 
 def run_experiment(
     stack_dir,
     output_dir=None,
+    exp_name="run",
     image_size=(512, 512),
     device="cuda",
-    anchor_band=0,
+    anchor_band=-1,
     fast_mode=True,
     eval_ref_band_idx=None,
     spectral_path=None,
-    save_bands=False,
+    save_before_bands=True,
 ):
-    stack_dir = resolve_path(stack_dir)
-    output_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR / stack_dir.name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    spectral_path = resolve_path(spectral_path or DEFAULT_SPECTRAL_PATH)
+    stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR, PROJECT_ROOT / "All code"])
+    base_output = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
+    run_dir = create_run_dir(base_output, exp_name=exp_name)
+    spectral_path = resolve_path(spectral_path or DEFAULT_SPECTRAL_PATH, PROJECT_ROOT, [DATA_DIR])
     device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-    print("=" * 60)
-    print("PIFReg StackFlow3D Experiment (Scheme A)")
-    print("=" * 60)
-    print("3D U-Net on (1,1,N,H,W) -> per-band 2D flows -> 2D warp")
-    print("Loss: sequential pairwise NCC mean + flow smoothness")
-    print("-" * 60)
-    print(f"Input folder : {stack_dir}")
-    print(f"Output folder: {output_dir}")
-    print(f"Image size   : {image_size}")
-    print(f"Anchor band  : {anchor_band}")
-    print(f"Device       : {device}")
-
-    bands_before, band_files = load_hsi_stack(stack_dir, image_size=image_size)
-    n_bands = len(bands_before)
-    print(f"Loaded bands : {n_bands}")
-    print(f"Wavelength range: {band_files[0].stem} - {band_files[-1].stem} nm")
-
+    bands_norm, bands_raw, band_files = load_hsi_stack(stack_dir, image_size=image_size)
+    n_bands = len(bands_norm)
+    anchor_band = int(anchor_band) % n_bands
     if eval_ref_band_idx is None:
         eval_ref_band_idx = n_bands // 2
 
-    print("\n[1/4] Evaluating stack BEFORE registration ...")
-    metrics_before = evaluate_stack(bands_before, eval_ref_band_idx)
+    registration_kwargs = {"anchor_band_idx": anchor_band, "fast_mode": fast_mode}
+    config = build_groupwise_config(
+        EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
+        band_files, eval_ref_band_idx, spectral_path, registration_kwargs,
+        anchor_band=anchor_band,
+    )
 
-    print("[2/4] Running StackFlow3D registration ...")
+    print("=" * 60)
+    print("PIFReg StackFlow3D Experiment")
+    print(f"Run folder: {run_dir}, anchor={anchor_band}")
+
+    metrics_before = evaluate_stack(bands_norm, eval_ref_band_idx)
     t0 = time.perf_counter()
-    bands_after, reg_info = register_pifreg_groupwise_stackflow3d(
-        bands_before,
-        device=str(device),
-        anchor_band_idx=anchor_band,
-        fast_mode=fast_mode,
-        verbose=True,
+    bands_norm_after, reg_info, flow_stack = register_pifreg_groupwise_stackflow3d(
+        bands_norm, device=str(device), anchor_band_idx=anchor_band,
+        fast_mode=fast_mode, verbose=True,
     )
     elapsed = time.perf_counter() - t0
-    print(f"Registration finished in {elapsed:.1f}s ({elapsed / 60:.1f} min)")
+    config["registration_result"] = reg_info
 
-    print("[3/4] Evaluating stack AFTER registration ...")
-    metrics_after = evaluate_stack(bands_after, eval_ref_band_idx)
+    metrics_after = evaluate_stack(bands_norm_after, eval_ref_band_idx)
     metrics_summary = compare_metrics(metrics_before, metrics_after)
+    bands_raw_after = warp_bands_with_flow_stack(
+        bands_raw, flow_stack, anchor_band_idx=anchor_band, device=str(device),
+    )
 
-    print("[4/4] Synthesizing RGB images ...")
-    rgb_before = hsi_to_rgb(bands_before, spectral_data_path=str(spectral_path))
-    rgb_after = hsi_to_rgb(bands_after, spectral_data_path=str(spectral_path))
+    manifest = record_groupwise_experiment(
+        run_dir=run_dir,
+        config=config,
+        architecture_text=describe_stackflow3d_architecture(
+            image_size, n_bands, anchor_band, fast_mode,
+        ),
+        bands_raw_before=bands_raw,
+        bands_raw_after=bands_raw_after,
+        band_files=band_files,
+        rgb_before=hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path)),
+        rgb_after=hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path)),
+        metrics_before=metrics_before,
+        metrics_after=metrics_after,
+        metrics_summary=metrics_summary,
+        elapsed_seconds=elapsed,
+        flow_stack=flow_stack,
+        moving_band_indices=reg_info.get("moving_band_indices"),
+        anchor_band_idx=anchor_band,
+        save_before_bands=save_before_bands,
+        rgb_title_after="RGB After PIFReg StackFlow3D",
+    )
 
-    cv2.imwrite(str(output_dir / "rgb_before.png"), rgb_before)
-    cv2.imwrite(str(output_dir / "rgb_after.png"), rgb_after)
-    save_rgb_comparison(rgb_before, rgb_after, output_dir / "rgb_compare.png")
-
-    if save_bands:
-        reg_dir = output_dir / "registered_bands"
-        reg_dir.mkdir(exist_ok=True)
-        for path, band in zip(band_files, bands_after):
-            cv2.imwrite(str(reg_dir / path.name), (np.clip(band, 0, 1) * 255).astype(np.uint8))
-
-    report = {
-        "stack_dir": str(stack_dir),
-        "num_bands": n_bands,
-        "image_size": list(image_size),
-        "registration_info": reg_info,
-        "elapsed_seconds": elapsed,
-        "eval_ref_band_index": eval_ref_band_idx,
-        "metrics_before_mean": metrics_before["mean"],
-        "metrics_after_mean": metrics_after["mean"],
-        "metrics_summary": metrics_summary,
-    }
-    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-
-    print("\n" + "=" * 60)
-    print("Mean metrics vs reference band")
-    print("=" * 60)
-    print(f"{'Metric':<8} {'Before':>10} {'After':>10} {'Delta':>10}")
-    print("-" * 42)
-    for key, vals in metrics_summary.items():
-        print(f"{key:<8} {vals['before']:>10.4f} {vals['after']:>10.4f} {vals['delta']:>10.4f}")
-
-    print("\nOutputs:")
-    for name in ("rgb_before.png", "rgb_after.png", "rgb_compare.png", "metrics.json"):
-        print(f"  {output_dir / name}")
-
-    return bands_after, reg_info, report
+    print(f"\nExperiment saved to: {run_dir}")
+    return bands_raw_after, reg_info, manifest
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="PIFReg StackFlow3D scheme A groupwise registration")
+    p = argparse.ArgumentParser(description="PIFReg StackFlow3D groupwise registration")
     p.add_argument("--stack-dir", type=str, default=str(DEFAULT_STACK_DIR))
     p.add_argument("--output-dir", type=str, default=None)
+    p.add_argument("--exp-name", type=str, default="run")
     p.add_argument("--image-size", type=int, nargs=2, default=[512, 512], metavar=("W", "H"))
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--anchor-band", type=int, default=0)
+    p.add_argument("--anchor-band", type=int, default=-1)
     p.add_argument("--no-fast-mode", action="store_true")
     p.add_argument("--eval-ref-band", type=int, default=None)
     p.add_argument("--spectral-path", type=str, default=str(DEFAULT_SPECTRAL_PATH))
-    p.add_argument("--save-bands", action="store_true")
+    p.add_argument("--no-save-before-bands", action="store_true")
     return p.parse_args()
 
 
@@ -245,11 +131,12 @@ if __name__ == "__main__":
     run_experiment(
         stack_dir=args.stack_dir,
         output_dir=args.output_dir,
+        exp_name=args.exp_name,
         image_size=tuple(args.image_size),
         device=args.device,
         anchor_band=args.anchor_band,
         fast_mode=not args.no_fast_mode,
         eval_ref_band_idx=args.eval_ref_band,
         spectral_path=args.spectral_path,
-        save_bands=args.save_bands,
+        save_before_bands=not args.no_save_before_bands,
     )
