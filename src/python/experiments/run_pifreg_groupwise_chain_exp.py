@@ -32,7 +32,7 @@ from src.python.registration.pif_groupwise_chain import (
 
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_SPECTRAL_PATH = PROJECT_ROOT / "HSI2RGB20240517.xlsx"
-DEFAULT_STACK_DIR = PROJECT_ROOT / "All code" / "cut_images_all" / "2024-06-25_10-12-29-white"
+DEFAULT_STACK_DIR = DATA_DIR / "cut_images_all" / "2024-06-25_10-12-29-white"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "pifreg_groupwise_chain"
 EXPERIMENT_ID = "pifreg_groupwise_chain"
 
@@ -48,7 +48,7 @@ def run_experiment(
     spectral_path=None,
     save_before_bands=True,
 ):
-    stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR, PROJECT_ROOT / "All code"])
+    stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR])
     base_output = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
     run_dir = create_run_dir(base_output, exp_name=exp_name)
     spectral_path = resolve_path(spectral_path or DEFAULT_SPECTRAL_PATH, PROJECT_ROOT, [DATA_DIR])

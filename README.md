@@ -145,7 +145,6 @@ python src/python/experiments/run_pifreg_groupwise_stackflow_exp.py
 本仓库**不包含**高光谱原始数据、配准结果或模型权重。本地常用目录（已在 `.gitignore` 中排除）：
 
 - `data/` — 测试集与切图
-- `All code/` — 历史数据与参考代码
 - `outputs/` — 实验输出（StackFlow 脚本会自动写入 `outputs/.../runs/`）
 - `models/` — 可选预训练权重
 

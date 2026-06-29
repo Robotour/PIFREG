@@ -95,7 +95,6 @@ PIFReg 是一种**逐对、无监督、test-time optimization** 的 2D 图像配
 │   │   ├── run_registration_exp.py  ★ pairwise 实验入口
 │   │   └── run_groupwise_registration_exp.py  # Elastix 群组配准（非 PIFReg）
 │   └── vendor/pyelastix.py          # Elastix Python 封装
-└── All code/                        # 历史代码，一般不要改
 ```
 
 ---
@@ -264,7 +263,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 ```
 data/Test dataset/<session_id>/
 data/cut_images_all/<session_id>/
-All code/cut_images_all/<session_id>/
 ```
 
 加载后应 **Min-Max 归一化到 [0, 1]**（`load_images` 已做）。

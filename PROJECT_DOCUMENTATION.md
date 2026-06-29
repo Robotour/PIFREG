@@ -324,7 +324,7 @@ img_list = {img1, img2, img3};  % 图像元胞数组
 
 | 变更类型 | 原状态 | 新状态 |
 |----------|--------|--------|
-| 目录重组 | 散落在`All code/`、`python code/`等多处 | 统一到`src/python/`和`src/matlab/` |
+| 目录重组 | 散落在`data/`、`python code/`等多处 | 统一到`src/python/`和`src/matlab/` |
 | 代码去重 | `shift.py`等在多处重复 | 合并到`utils/image_transform.py` |
 | 包结构 | 无Python包结构 | 完整的模块化包结构 |
 | 文档 | 代码无注释/文档 | 添加完整docstring |
@@ -336,7 +336,7 @@ img_list = {img1, img2, img3};  % 图像元胞数组
 **重构前**:
 ```
 24_hyper_registration/
-├── All code/
+├── data/
 │   ├── shift.py
 │   ├── shift_and_rotate.py
 │   ├── hsi_to_rgb.py
@@ -368,14 +368,14 @@ src/
 
 | 原文件 | 合并到 | 说明 |
 |--------|--------|------|
-| `All code/shift.py`, `python code/shift.py` | `utils/image_transform.py` | 合并为一个统一的shift函数 |
-| `All code/shift_and_rotate.py`, `python code/shift_and_rotate.py` | `utils/image_transform.py` | 合并 |
-| `All code/hsi_to_rgb.py`, `python code/hsi_to_rgb.py` | `preprocessing/hsi_to_rgb.py` | 合并 |
-| `All code/evaluation_all.py` | `metrics/evaluation.py` | 重命名更清晰 |
-| `All code/loss_all.py` | `losses/registration_losses.py` | 重命名 |
-| `All code/net_all.py` | `networks/registration_networks.py` | 重命名 |
-| `All code/registrationfun_all.py` | `registration/methods.py` | 拆分为独立函数 |
-| `All code/keren.m`, `keren2.m`, `keren3.m` | `matlab/core/registration/keren.m`, `keren2.m` | 合并版本 |
+| `data/shift.py`, `python code/shift.py` | `utils/image_transform.py` | 合并为一个统一的shift函数 |
+| `data/shift_and_rotate.py`, `python code/shift_and_rotate.py` | `utils/image_transform.py` | 合并 |
+| `data/hsi_to_rgb.py`, `python code/hsi_to_rgb.py` | `preprocessing/hsi_to_rgb.py` | 合并 |
+| `data/evaluation_all.py` | `metrics/evaluation.py` | 重命名更清晰 |
+| `data/loss_all.py` | `losses/registration_losses.py` | 重命名 |
+| `data/net_all.py` | `networks/registration_networks.py` | 重命名 |
+| `data/registrationfun_all.py` | `registration/methods.py` | 拆分为独立函数 |
+| `data/keren.m`, `keren2.m`, `keren3.m` | `matlab/core/registration/keren.m`, `keren2.m` | 合并版本 |
 
 #### 3. 函数接口规范化
 

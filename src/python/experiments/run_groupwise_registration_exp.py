@@ -25,9 +25,7 @@ from src.python.registration import register_elastix_groupwise
 
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_SPECTRAL_PATH = PROJECT_ROOT / "HSI2RGB20240517.xlsx"
-DEFAULT_STACK_DIR = (
-    PROJECT_ROOT / "All code" / "cut_images_all" / "2024-06-25_10-12-29-white"
-)
+DEFAULT_STACK_DIR = DATA_DIR / "cut_images_all" / "2024-06-25_10-12-29-white"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "groupwise"
 
 
@@ -36,7 +34,7 @@ def resolve_path(path):
     if candidate.exists():
         return candidate.resolve()
 
-    for base in (PROJECT_ROOT, DATA_DIR, PROJECT_ROOT / "All code"):
+    for base in (PROJECT_ROOT, DATA_DIR):
         resolved = base / candidate
         if resolved.exists():
             return resolved.resolve()

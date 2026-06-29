@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument(
         '--data-dirs',
         nargs='+',
-        default=['data/Test dataset', 'data/cut_images_all', 'All code/cut_images_all'],
+        default=['data/Test dataset', 'data/cut_images_all'],
         help='Root folders containing wavelength-named band images',
     )
     parser.add_argument('--image-size', type=int, nargs=2, default=[256, 256], metavar=('W', 'H'))
