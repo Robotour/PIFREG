@@ -178,6 +178,27 @@ def build_groupwise_config(
     return cfg
 
 
+def warp_bands_with_elastix_fields(bands_raw, fields) -> List[np.ndarray]:
+    """将 Elastix 群组配准返回的逐波段位移场作用于原图。"""
+    import SimpleITK as sitk
+
+    warped = []
+    for band, field in zip(bands_raw, fields):
+        field_x, field_y = field
+        fx = sitk.GetImageFromArray(np.asarray(field_x, dtype=np.float64))
+        fy = sitk.GetImageFromArray(np.asarray(field_y, dtype=np.float64))
+        size = fx.GetSize()
+        displacement = sitk.Image(size, sitk.sitkVectorFloat64)
+        for i in range(size[0]):
+            for j in range(size[1]):
+                displacement.SetPixel((i, j), (float(fx.GetPixel((i, j))), float(fy.GetPixel((i, j)))))
+        transform = sitk.DisplacementFieldTransform(displacement)
+        moving = sitk.GetImageFromArray(np.asarray(band, dtype=np.float32))
+        out = sitk.Resample(moving, transform)
+        warped.append(sitk.GetArrayFromImage(out).astype(np.float32))
+    return warped
+
+
 def warp_bands_with_shared_flow(bands_raw, flow_2hw: np.ndarray, device: str = "cpu"):
     """将共享位移场 (2,H,W) 作用于原图各波段。"""
     import torch

@@ -13,7 +13,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import cv2
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -28,61 +27,21 @@ from src.python.registration import (
 )
 from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
 from src.python.preprocessing import hsi_to_rgb
-from src.python.utils import normalize_image
+from src.python.experiments.experiment_data import load_pair_images
+from src.python.experiments.experiment_recorder import _band_to_uint8
 
 DATA_DIR = PROJECT_ROOT / "data"
 
 
-def resolve_image_path(path):
-    """Resolve image path relative to project root or data directory."""
-    candidate = Path(path)
-    if candidate.is_file():
-        return candidate
-
-    for base in (PROJECT_ROOT, DATA_DIR):
-        resolved = base / candidate
-        if resolved.is_file():
-            return resolved
-
-    raise FileNotFoundError(
-        f"Image not found: {path}\n"
-        f"Tried: {candidate.resolve()}, {PROJECT_ROOT / candidate}, {DATA_DIR / candidate}"
-    )
-
-
-def load_images(fixed_path, moving_path, image_size=(512, 512)):
-    """
-    加载并预处理图像
-    
-    参数:
-        fixed_path: 固定图像路径
-        moving_path: 移动图像路径
-        image_size: 目标图像大小
-    
-    返回:
-        fixed_image, moving_image: 预处理后的图像
-    """
-    fixed_image = cv2.imread(str(resolve_image_path(fixed_path)), cv2.IMREAD_GRAYSCALE)
-    moving_image = cv2.imread(str(resolve_image_path(moving_path)), cv2.IMREAD_GRAYSCALE)
-
-    if fixed_image is None:
-        raise ValueError(f"Failed to read fixed image: {fixed_path}")
-    if moving_image is None:
-        raise ValueError(f"Failed to read moving image: {moving_path}")
-
-    fixed_image = fixed_image.astype(np.float32)
-    moving_image = moving_image.astype(np.float32)
-
-    fixed_image = cv2.resize(fixed_image, image_size).astype(np.float32)
-    moving_image = cv2.resize(moving_image, image_size).astype(np.float32)
-
-    # Min-Max归一化
-    f_min, f_max = np.min(fixed_image), np.max(fixed_image)
-    m_min, m_max = np.min(moving_image), np.max(moving_image)
-    fixed_image = (fixed_image - f_min) / (f_max - f_min)
-    moving_image = (moving_image - m_min) / (m_max - m_min)
-
-    return fixed_image, moving_image
+def _warp_raw_with_flow(moving_raw, flow, device):
+    from src.python.voxelmorph.layers import SpatialTransformer
+    h, w = moving_raw.shape
+    m = torch.tensor(moving_raw, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
+    flow_t = torch.tensor(flow, dtype=torch.float32, device=device).unsqueeze(0)
+    transformer = SpatialTransformer((h, w)).to(device)
+    with torch.no_grad():
+        warped = transformer(m, flow_t)
+    return warped.squeeze().cpu().numpy().astype(np.float32)
 
 
 def evaluate_registration(fixed, moving, warped):
@@ -110,34 +69,30 @@ def evaluate_registration(fixed, moving, warped):
     return metrics
 
 
-def visualize_results(fixed, moving, warped, method_name):
-    """
-    可视化配准结果
-    
-    参数:
-        fixed: 固定图像
-        moving: 移动图像
-        warped: 变形图像
-        method_name: 配准方法名称
-    """
-    error_before = abs(fixed - moving)
-    error_after = abs(fixed - warped)
+def visualize_results(fixed_raw, moving_raw, warped_raw, method_name):
+    """可视化原图强度配准结果。"""
+    error_before = np.abs(
+        _band_to_uint8(fixed_raw).astype(np.float32) - _band_to_uint8(moving_raw).astype(np.float32)
+    )
+    error_after = np.abs(
+        _band_to_uint8(fixed_raw).astype(np.float32) - _band_to_uint8(warped_raw).astype(np.float32)
+    )
 
     plt.figure(figsize=(15, 5))
     plt.suptitle(f'Registration Results - {method_name}')
 
     plt.subplot(1, 5, 1)
-    plt.imshow(fixed, cmap='gray')
+    plt.imshow(_band_to_uint8(fixed_raw), cmap='gray')
     plt.title('Fixed Image')
     plt.axis('off')
 
     plt.subplot(1, 5, 2)
-    plt.imshow(moving, cmap='gray')
+    plt.imshow(_band_to_uint8(moving_raw), cmap='gray')
     plt.title('Moving Image')
     plt.axis('off')
 
     plt.subplot(1, 5, 3)
-    plt.imshow(warped, cmap='gray')
+    plt.imshow(_band_to_uint8(warped_raw), cmap='gray')
     plt.title('Warped Image')
     plt.axis('off')
 
@@ -167,12 +122,14 @@ def run_pifreg_experiment(fixed_path, moving_path, device='cuda'):
     print("Running PIFReg (Pyramid Instance Flow Registration)")
     print("=" * 50)
 
-    fixed, moving = load_images(fixed_path, moving_path)
+    fixed, moving, fixed_raw, moving_raw = load_pair_images(
+        fixed_path, moving_path, PROJECT_ROOT, DATA_DIR,
+    )
 
     device = torch.device(device if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    warped = register_pifreg(
+    warped_norm, flow = register_pifreg(
         fixed, moving,
         device=device,
         epochs=10000,
@@ -186,16 +143,18 @@ def run_pifreg_experiment(fixed_path, moving_path, device='cuda'):
         lr_schedule='cosine',
         lr_min=1e-6,
         fast_mode=True,
+        return_flow=True,
     )
+    warped_raw = _warp_raw_with_flow(moving_raw, flow, device)
 
-    metrics = evaluate_registration(fixed, moving, warped)
+    metrics = evaluate_registration(fixed, moving, warped_norm)
     print("\nEvaluation Metrics:")
     for key, value in metrics.items():
         print(f"  {key}: {value:.4f}")
 
-    visualize_results(fixed, moving, warped, "PIFReg")
+    visualize_results(fixed_raw, moving_raw, warped_raw, "PIFReg")
 
-    return warped, metrics
+    return warped_raw, metrics
 
 
 def run_voxelmorph_experiment(fixed_path, moving_path, device='cuda'):
@@ -211,22 +170,20 @@ def run_elastix_experiment(fixed_path, moving_path):
     print("Running Elastix Registration Experiment")
     print("=" * 50)
 
-    # 加载图像
-    fixed, moving = load_images(fixed_path, moving_path)
+    fixed, moving, fixed_raw, moving_raw = load_pair_images(
+        fixed_path, moving_path, PROJECT_ROOT, DATA_DIR,
+    )
 
-    # 配准
-    warped = register_elastix(fixed, moving, epochs=100, spacinginvoxels=20)
+    warped_raw = register_elastix(fixed_raw, moving_raw, epochs=100, spacinginvoxels=20)
 
-    # 评估
-    metrics = evaluate_registration(fixed, moving, warped)
+    metrics = evaluate_registration(fixed, moving, warped_raw)
     print("\nEvaluation Metrics:")
     for key, value in metrics.items():
         print(f"  {key}: {value:.4f}")
 
-    # 可视化
-    visualize_results(fixed, moving, warped, "Elastix")
+    visualize_results(fixed_raw, moving_raw, warped_raw, "Elastix")
 
-    return warped, metrics
+    return warped_raw, metrics
 
 
 def run_stackreg_experiment(fixed_path, moving_path):
@@ -237,22 +194,20 @@ def run_stackreg_experiment(fixed_path, moving_path):
     print("Running StackReg Registration Experiment")
     print("=" * 50)
 
-    # 加载图像
-    fixed, moving = load_images(fixed_path, moving_path)
+    fixed, moving, fixed_raw, moving_raw = load_pair_images(
+        fixed_path, moving_path, PROJECT_ROOT, DATA_DIR,
+    )
 
-    # 配准
-    warped = register_stackreg(fixed, moving, transform_type='bilinear')
+    warped_raw = register_stackreg(fixed_raw, moving_raw, transform_type='bilinear')
 
-    # 评估
-    metrics = evaluate_registration(fixed, moving, warped)
+    metrics = evaluate_registration(fixed, moving, warped_raw)
     print("\nEvaluation Metrics:")
     for key, value in metrics.items():
         print(f"  {key}: {value:.4f}")
 
-    # 可视化
-    visualize_results(fixed, moving, warped, "StackReg")
+    visualize_results(fixed_raw, moving_raw, warped_raw, "StackReg")
 
-    return warped, metrics
+    return warped_raw, metrics
 
 
 if __name__ == "__main__":

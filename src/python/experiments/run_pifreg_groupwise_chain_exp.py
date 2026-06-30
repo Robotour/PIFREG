@@ -10,7 +10,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import numpy as np
 import torch
 
 from src.python.experiments.experiment_data import (
@@ -30,6 +29,7 @@ from src.python.registration.pif_groupwise_chain import (
     evaluate_chain_pairwise_ncc,
     register_pifreg_chain,
 )
+from src.python.registration.pif_groupwise_stackflow import warp_bands_with_flow_stack
 
 DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_SPECTRAL_PATH = PROJECT_ROOT / "HSI2RGB20240517.xlsx"
@@ -59,6 +59,7 @@ def run_experiment(
         stack_dir, image_size=image_size, return_wavelengths=True,
     )
     n_bands = len(bands_norm)
+    anchor_band = n_bands - 1
     if eval_ref_band_idx is None:
         eval_ref_band_idx = n_bands // 2
 
@@ -66,7 +67,7 @@ def run_experiment(
     config = build_groupwise_config(
         EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
         band_files, eval_ref_band_idx, spectral_path, registration_kwargs,
-        extra={"saved_bands_after": "normalized_registration_output"},
+        anchor_band=anchor_band,
     )
 
     chain_before = evaluate_chain_pairwise_ncc(bands_norm, wavelengths, descending=True)
@@ -77,7 +78,7 @@ def run_experiment(
 
     metrics_before = evaluate_stack(bands_norm, eval_ref_band_idx)
     t0 = time.perf_counter()
-    bands_norm_after, reg_info = register_pifreg_chain(
+    bands_norm_after, reg_info, flow_stack = register_pifreg_chain(
         bands_norm, device=str(device), descending=True, wavelengths_nm=wavelengths,
         fast_mode=fast_mode, verbose=True,
     )
@@ -88,8 +89,9 @@ def run_experiment(
     metrics_after = evaluate_stack(bands_norm_after, eval_ref_band_idx)
     metrics_summary = compare_metrics(metrics_before, metrics_after)
 
-    # 链式无统一位移场栈；after 保存归一化配准结果（×255）
-    bands_save_after = [b.astype(np.float32) for b in bands_norm_after]
+    bands_raw_after = warp_bands_with_flow_stack(
+        bands_raw, flow_stack, anchor_band_idx=anchor_band, device=str(device),
+    )
 
     chain_section = [
         "",
@@ -105,14 +107,17 @@ def run_experiment(
         config=config,
         architecture_text=describe_chain_architecture(n_bands, descending=True),
         bands_raw_before=bands_raw,
-        bands_raw_after=bands_save_after,
+        bands_raw_after=bands_raw_after,
         band_files=band_files,
         rgb_before=hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path)),
-        rgb_after=hsi_to_rgb(bands_norm_after, spectral_data_path=str(spectral_path)),
+        rgb_after=hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path)),
         metrics_before=metrics_before,
         metrics_after=metrics_after,
         metrics_summary=metrics_summary,
         elapsed_seconds=elapsed,
+        flow_stack=flow_stack,
+        moving_band_indices=reg_info.get("moving_band_indices"),
+        anchor_band_idx=anchor_band,
         save_before_bands=save_before_bands,
         rgb_title_after="RGB After PIFReg Chain",
         summary_extra_sections=chain_section,
@@ -120,7 +125,7 @@ def run_experiment(
 
     print(f"Chain NCC after: {chain_after['mean_NCC']:.4f}")
     print(f"\nExperiment saved to: {run_dir}")
-    return bands_norm_after, reg_info, manifest
+    return bands_raw_after, reg_info, manifest
 
 
 def parse_args():

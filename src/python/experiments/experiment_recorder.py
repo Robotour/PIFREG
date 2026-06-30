@@ -505,7 +505,7 @@ def record_groupwise_experiment(
     """
     群组配准实验标准记录（所有 groupwise 脚本共用）。
 
-    bands_raw_* : 原图强度；若方法无位移场回传，after 可为配准管线直接输出。
+    bands_raw_* : 原图强度；配准在归一化空间优化，保存/RGB 应对原图施加位移场后的结果。
     """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

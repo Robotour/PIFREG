@@ -19,7 +19,14 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
+from src.python.experiments.experiment_data import (
+    compare_metrics,
+    evaluate_stack,
+    load_hsi_stack as load_hsi_stack_norm_raw,
+    resolve_path as resolve_data_path,
+    warp_bands_with_elastix_fields,
+)
+from src.python.experiments.experiment_recorder import _band_to_uint8
 from src.python.preprocessing import hsi_to_rgb
 from src.python.registration import register_elastix_groupwise
 
@@ -30,119 +37,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "groupwise"
 
 
 def resolve_path(path):
-    candidate = Path(path)
-    if candidate.exists():
-        return candidate.resolve()
-
-    for base in (PROJECT_ROOT, DATA_DIR):
-        resolved = base / candidate
-        if resolved.exists():
-            return resolved.resolve()
-
-    raise FileNotFoundError(f"Path not found: {path}")
-
-
-def sort_band_files(folder):
-    """按文件名中的波长数值升序排列波段图像。"""
-    files = list(Path(folder).glob("*.jpeg")) + list(Path(folder).glob("*.jpg"))
-    if not files:
-        raise FileNotFoundError(f"No jpeg images found in {folder}")
-
-    def band_key(path):
-        stem = path.stem
-        try:
-            return int(stem)
-        except ValueError:
-            return stem
-
-    return sorted(files, key=band_key)
-
-
-def load_hsi_stack(folder, image_size=(256, 256)):
-    """
-    加载文件夹内全部波段，返回按波长排序的 float32 列表。
-
-    每个波段独立做 Min-Max 归一化到 [0, 1]。
-    """
-    band_files = sort_band_files(folder)
-    bands = []
-
-    for path in band_files:
-        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise ValueError(f"Failed to read image: {path}")
-
-        img = img.astype(np.float32)
-        if image_size is not None:
-            img = cv2.resize(img, image_size)
-
-        lo, hi = float(np.min(img)), float(np.max(img))
-        if hi > lo:
-            img = (img - lo) / (hi - lo)
-        bands.append(img)
-
-    return bands, band_files
-
-
-def stack_to_list(stack):
-    if isinstance(stack, list):
-        return stack
-    stack = np.asarray(stack)
-    return [stack[i] for i in range(stack.shape[0])]
-
-
-def evaluate_stack(bands, ref_idx):
-    """以中间波段为参考，统计全栈相对参考波段的指标。"""
-    ref = bands[ref_idx]
-    metrics = {
-        "ref_band_index": ref_idx,
-        "per_band": [],
-        "mean": {},
-    }
-
-    keys = ("MI", "NMI", "NCC", "NTG")
-    sums = {k: 0.0 for k in keys}
-
-    for i, band in enumerate(bands):
-        if i == ref_idx:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, ref)),
-                "NMI": float(compute_NMI(ref, ref)),
-                "NCC": float(compute_NCC(ref, ref)),
-                "NTG": float(compute_NTG(ref, ref)),
-            }
-        else:
-            row = {
-                "band_index": i,
-                "MI": float(compute_MI(ref, band)),
-                "NMI": float(compute_NMI(ref, band)),
-                "NCC": float(compute_NCC(ref, band)),
-                "NTG": float(compute_NTG(ref, band)),
-            }
-        metrics["per_band"].append(row)
-        for k in keys:
-            sums[k] += row[k]
-
-    n = len(bands)
-    for k in keys:
-        metrics["mean"][k] = sums[k] / n
-
-    return metrics
-
-
-def compare_metrics(before, after):
-    """汇总配准前后均值指标变化。"""
-    summary = {}
-    for key in ("MI", "NMI", "NCC", "NTG"):
-        b = before["mean"][key]
-        a = after["mean"][key]
-        summary[key] = {
-            "before": b,
-            "after": a,
-            "delta": a - b,
-        }
-    return summary
+    return resolve_data_path(path, PROJECT_ROOT, [DATA_DIR])
 
 
 def save_rgb_comparison(rgb_before, rgb_after, output_path):
@@ -186,8 +81,8 @@ def run_experiment(
     print(f"Epochs/layer : {epochs}")
     print(f"Grid spacing : {spacinginvoxels} voxels")
 
-    bands_before, band_files = load_hsi_stack(stack_dir, image_size=image_size)
-    n_bands = len(bands_before)
+    bands_norm, bands_raw, band_files = load_hsi_stack_norm_raw(stack_dir, image_size=image_size)
+    n_bands = len(bands_norm)
     print(f"Loaded bands : {n_bands}")
     print(f"Wavelength range: {band_files[0].stem} - {band_files[-1].stem} nm")
 
@@ -196,23 +91,24 @@ def run_experiment(
     ref_band_idx = int(ref_band_idx)
 
     print("\n[1/4] Evaluating stack BEFORE registration ...")
-    metrics_before = evaluate_stack(bands_before, ref_band_idx)
+    metrics_before = evaluate_stack(bands_norm, ref_band_idx)
 
     print("[2/4] Running groupwise Elastix registration ...")
-    bands_after, fields = register_elastix_groupwise(
-        bands_before,
+    bands_norm_after, fields = register_elastix_groupwise(
+        bands_norm,
         epochs=epochs,
         spacinginvoxels=spacinginvoxels,
         verbose=verbose,
     )
 
     print("[3/4] Evaluating stack AFTER registration ...")
-    metrics_after = evaluate_stack(bands_after, ref_band_idx)
+    metrics_after = evaluate_stack(bands_norm_after, ref_band_idx)
     metrics_summary = compare_metrics(metrics_before, metrics_after)
 
-    print("[4/4] Synthesizing RGB images ...")
-    rgb_before = hsi_to_rgb(bands_before, spectral_data_path=str(spectral_path))
-    rgb_after = hsi_to_rgb(bands_after, spectral_data_path=str(spectral_path))
+    print("[4/4] Applying Elastix fields to raw images & saving ...")
+    bands_raw_after = warp_bands_with_elastix_fields(bands_raw, fields)
+    rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
+    rgb_after = hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path))
 
     cv2.imwrite(str(output_dir / "rgb_before.png"), rgb_before)
     cv2.imwrite(str(output_dir / "rgb_after.png"), rgb_after)
@@ -221,9 +117,8 @@ def run_experiment(
     if save_bands:
         reg_dir = output_dir / "registered_bands"
         reg_dir.mkdir(exist_ok=True)
-        for path, band in zip(band_files, bands_after):
-            out = (np.clip(band, 0, 1) * 255).astype(np.uint8)
-            cv2.imwrite(str(reg_dir / path.name), out)
+        for path, band in zip(band_files, bands_raw_after):
+            cv2.imwrite(str(reg_dir / path.name), _band_to_uint8(band))
 
     report = {
         "stack_dir": str(stack_dir),
@@ -258,7 +153,7 @@ def run_experiment(
     print(f"  {output_dir / 'rgb_compare.png'}")
     print(f"  {output_dir / 'metrics.json'}")
 
-    return bands_after, fields, report
+    return bands_raw_after, fields, report
 
 
 def parse_args():

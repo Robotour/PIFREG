@@ -90,7 +90,7 @@ def register_pifreg_chain(
     wavelengths_nm: Optional[Sequence[str]] = None,
     verbose: bool = True,
     **pifreg_kwargs,
-) -> Tuple[List[np.ndarray], Dict[str, Any]]:
+) -> Tuple[List[np.ndarray], Dict[str, Any], np.ndarray]:
     """
     链式全局配准（高波长锚点 → 低波长）。
 
@@ -103,13 +103,14 @@ def register_pifreg_chain(
         **pifreg_kwargs: 传给 register_pifreg
 
     返回:
-        registered_list: 与输入相同顺序（升序波长）的配准结果
+        registered_list: 归一化空间配准结果（用于指标）
         info: 链式元数据及配准后 pairwise NCC
+        flow_stack: (N-1, 2, H, W) 各位移场，供原图 warp
     """
     bands = _as_band_list(img_list)
     n = len(bands)
     if n <= 1:
-        return bands, {'mode': 'chain', 'num_bands': n}
+        return bands, {'mode': 'chain', 'num_bands': n}, np.zeros((0, 2, 0, 0), dtype=np.float32)
 
     kwargs = _default_pifreg_kwargs()
     kwargs.update(pifreg_kwargs)
@@ -136,6 +137,7 @@ def register_pifreg_chain(
         )
 
     step_logs = []
+    flows_by_band: Dict[int, np.ndarray] = {}
     for step, (ref_idx, mov_idx) in enumerate(chain_steps, start=1):
         fixed = registered[ref_idx]
         moving = bands[mov_idx]
@@ -148,7 +150,8 @@ def register_pifreg_chain(
                 f'(NCC before={ncc_before:.4f})'
             )
 
-        warped = register_pifreg(fixed, moving, device=device, **kwargs)
+        warped, flow = register_pifreg(fixed, moving, device=device, return_flow=True, **kwargs)
+        flows_by_band[mov_idx] = flow
         ncc_after = _pairwise_ncc(fixed, warped)
         registered[mov_idx] = warped
 
@@ -166,16 +169,20 @@ def register_pifreg_chain(
             print(f'       NCC after={ncc_after:.4f}')
 
     chain_ncc = evaluate_chain_pairwise_ncc(registered, wavelengths_nm, descending=descending)
+    moving_indices = [i for i in range(n) if i != anchor_idx]
+    flow_stack = np.stack([flows_by_band[i] for i in moving_indices], axis=0).astype(np.float32)
 
     info = {
         'mode': 'chain',
         'method': METHOD_CHAIN_FULL_NAME,
         'num_bands': n,
         'anchor_band_index': anchor_idx,
+        'moving_band_indices': moving_indices,
+        'flow_stack_shape': list(flow_stack.shape),
         'anchor_wavelength_nm': wavelengths_nm[anchor_idx],
         'direction': 'descending_wavelength' if descending else 'ascending_wavelength',
         'steps': step_logs,
         'chain_pairwise_ncc': chain_ncc,
         'pifreg_kwargs': {k: v for k, v in kwargs.items() if k != 'save_model_path'},
     }
-    return registered, info
+    return registered, info, flow_stack
