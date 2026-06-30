@@ -169,7 +169,7 @@ def run_experiment(
     spectral_path=None,
     ref_band_idx=None,
     verbose=2,
-    save_bands=true,
+    save_bands=True,
 ):
     stack_dir = resolve_path(stack_dir)
     output_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR / stack_dir.name
