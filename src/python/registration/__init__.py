@@ -3,6 +3,7 @@ from .pif_registration import register_pifreg, METHOD_NAME, METHOD_FULL_NAME
 from .pif_groupwise_stackflow import register_pifreg_groupwise_stackflow
 from .pif_groupwise_stackflow3d import register_pifreg_groupwise_stackflow3d
 from .pif_groupwise_chain import register_pifreg_chain
+from .pif_groupwise_cascade import register_pifreg_groupwise_cascade
 from .pif_groupwise_joint import register_pifreg_groupwise_joint
 from .methods import (
     register_elastix,
@@ -19,6 +20,7 @@ __all__ = [
     'register_pifreg_groupwise_stackflow',
     'register_pifreg_groupwise_stackflow3d',
     'register_pifreg_chain',
+    'register_pifreg_groupwise_cascade',
     'register_pifreg_groupwise_joint',
     'register_voxelmorph',
     'register_elastix',

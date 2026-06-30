@@ -452,6 +452,36 @@ def describe_chain_architecture(num_bands, descending=True) -> str:
     ])
 
 
+def describe_cascade_architecture(
+    num_bands,
+    keyframe_interval=5,
+    anchor_band_idx=-1,
+    refine_pyramid=(128, 256, 512),
+    refine_epochs=(300, 500, 800),
+    feature_mode="mean_anchor",
+) -> str:
+    return "\n".join([
+        "PIFReg Cascade — Keyframe Scaffold + StackFlow Refine",
+        "=" * 50,
+        "",
+        f"Bands: {num_bands}, anchor index: {anchor_band_idx}",
+        "",
+        "Stage 1 — Keyframe scaffold",
+        f"  Keyframe interval: every {keyframe_interval} bands (+ endpoints + anchor)",
+        f"  PIFReg calls: ~{max(1, num_bands // keyframe_interval)} (not {num_bands - 1})",
+        "  Flow interpolation: linear along band index between keyframes",
+        "",
+        "Stage 2 — StackFlow residual refine",
+        f"  Warm-start: init_flow_stack from Stage 1",
+        f"  Pyramid: {list(refine_pyramid)}",
+        f"  Epochs per level: {list(refine_epochs)}",
+        f"  Feature mode: {feature_mode}",
+        "  Loss: sequential pairwise NCC mean + per-flow smoothness",
+        "",
+        "Goal: ~Chain accuracy, faster than full chain, global drift correction",
+    ])
+
+
 def describe_stackflow3d_architecture(image_size, num_bands, anchor_band_idx=0, fast_mode=True) -> str:
     h, w = image_size
     return "\n".join([
