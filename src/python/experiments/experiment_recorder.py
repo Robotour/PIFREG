@@ -21,9 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -440,6 +437,43 @@ def describe_joint_architecture(image_size, num_bands, ref_band_idx=None, fast_m
     ])
 
 
+def describe_sliding_window_architecture(
+    image_size,
+    num_bands,
+    anchor_band_idx=-1,
+    window_size=5,
+    window_stride=1,
+    fast_mode=True,
+    feature_mode='mean_anchor',
+    spectral_enc_channels=4,
+) -> str:
+    h, w = image_size
+    enc_nf, dec_nf = compact_unet_features() if fast_mode else default_unet_features()
+    n_win = min(window_size, num_bands)
+    n_windows = max(1, num_bands - n_win + 1) if num_bands > n_win else 1
+    if num_bands > n_win:
+        n_windows = len(range(0, num_bands - n_win + 1, max(1, window_stride)))
+    feat = (
+        f'spectral_encoder(K={spectral_enc_channels}) + window anchor'
+        if feature_mode == 'spectral_encoder'
+        else 'stack mean + window anchor'
+    )
+    return '\n'.join([
+        'PIFReg Sliding-Window Adjacent Joint Registration',
+        '=' * 50,
+        '',
+        f'Bands: {num_bands}, global anchor index: {anchor_band_idx}',
+        f'Window size: {n_win} bands → {n_win - 1} flows per window',
+        f'Window stride: {window_stride} ({n_windows} windows / pyramid level)',
+        f'Backbone: PerBandStackFlowNet (2D U-Net) per window',
+        f'U-Net inshape=({h}, {w}), input features: {feat}',
+        f'  encoder: {enc_nf}, decoder: {dec_nf}',
+        'Loss per window: adjacent NCC mean + spatial flow grad + spectral flow smooth',
+        'Merge: average overlapping flow estimates across windows',
+        'Constraint: adjacent-band similarity only (no cross-band matching)',
+    ])
+
+
 def describe_chain_architecture(num_bands, descending=True) -> str:
     direction = "high→low wavelength" if descending else "low→high wavelength"
     return "\n".join([
@@ -452,36 +486,6 @@ def describe_chain_architecture(num_bands, descending=True) -> str:
         "Each step: VoxelMorph U-Net pairwise registration",
         "Loss per step: NCC + smoothness (test-time optimization)",
         "Primary metric: mean adjacent-band NCC along chain",
-    ])
-
-
-def describe_cascade_architecture(
-    num_bands,
-    keyframe_interval=5,
-    anchor_band_idx=-1,
-    refine_pyramid=(128, 256, 512),
-    refine_epochs=(300, 500, 800),
-    feature_mode="mean_anchor",
-) -> str:
-    return "\n".join([
-        "PIFReg Cascade — Keyframe Scaffold + StackFlow Refine",
-        "=" * 50,
-        "",
-        f"Bands: {num_bands}, anchor index: {anchor_band_idx}",
-        "",
-        "Stage 1 — Keyframe scaffold",
-        f"  Keyframe interval: every {keyframe_interval} bands (+ endpoints + anchor)",
-        f"  PIFReg calls: ~{max(1, num_bands // keyframe_interval)} (not {num_bands - 1})",
-        "  Flow interpolation: linear along band index between keyframes",
-        "",
-        "Stage 2 — StackFlow residual refine",
-        f"  Warm-start: init_flow_stack from Stage 1",
-        f"  Pyramid: {list(refine_pyramid)}",
-        f"  Epochs per level: {list(refine_epochs)}",
-        f"  Feature mode: {feature_mode}",
-        "  Loss: sequential pairwise NCC mean + per-flow smoothness",
-        "",
-        "Goal: ~Chain accuracy, faster than full chain, global drift correction",
     ])
 
 

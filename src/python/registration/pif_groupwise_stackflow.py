@@ -498,7 +498,6 @@ def register_pifreg_groupwise_stackflow(
     feature_mode: str = FEATURE_MODE_MEAN_ANCHOR,
     spectral_enc_channels: int = DEFAULT_SPECTRAL_ENC_CHANNELS,
     spectral_enc_kernel: int = DEFAULT_SPECTRAL_ENC_KERNEL,
-    init_flow_stack: Optional[np.ndarray] = None,
     verbose: bool = True,
 ) -> Tuple[List[np.ndarray], Dict[str, Any], np.ndarray]:
     """
@@ -513,7 +512,6 @@ def register_pifreg_groupwise_stackflow(
         pyramid_sizes: 金字塔各层边长，默认 (32,64,128,256,512)
         ncc_weight: 相邻波段 NCC 均值项权重
         epochs_per_level / patience_per_level: 各层 epoch 与早停耐心
-        init_flow_stack: 可选初始 flow (N-1, 2, H, W)，用于残差精修（如 cascade Stage 2）
     """
     device = _resolve_device(device)
     bands = _as_band_list(img_list)
@@ -557,18 +555,6 @@ def register_pifreg_groupwise_stackflow(
 
     working = [b.copy() for b in bands]
     flow_stack_full = None
-    if init_flow_stack is not None:
-        init_np = np.asarray(init_flow_stack, dtype=np.float32)
-        expected_m = n - 1
-        if init_np.shape[0] != expected_m or init_np.ndim != 4 or init_np.shape[1] != 2:
-            raise ValueError(
-                f'init_flow_stack expected ({expected_m}, 2, H, W), got {init_np.shape}'
-            )
-        flow_stack_full = torch.tensor(init_np, dtype=torch.float32, device=device).unsqueeze(0)
-        if flow_stack_full.shape[-2:] != (h, w):
-            flow_stack_full = _upsample_flow_stack(flow_stack_full, h, w)
-        if verbose:
-            print(f'{METHOD_NAME}: warm-start from init_flow_stack {list(init_np.shape)}')
 
     for li, (sh, sw) in enumerate(levels):
         bands_s = _downsample_stack(working, sw, sh)
@@ -637,7 +623,6 @@ def register_pifreg_groupwise_stackflow(
         'feature_mode': feature_mode,
         'spectral_enc_channels': spectral_enc_channels,
         'spectral_enc_kernel': spectral_enc_kernel,
-        'init_flow_stack': init_flow_stack is not None,
         'device': str(device),
     }
     return registered, info, flow_np
