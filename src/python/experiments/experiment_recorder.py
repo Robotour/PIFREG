@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
+import matplotlib
+
+matplotlib.use('Agg')
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
