@@ -443,6 +443,8 @@ def describe_sliding_window_architecture(
     window_size=5,
     window_stride=1,
     schedule='pyramid_then_windows',
+    histogram_match=True,
+    affine_init=False,
     fast_mode=True,
 ) -> str:
     h, w = image_size
@@ -470,6 +472,8 @@ def describe_sliding_window_architecture(
         f'  encoder: {enc_nf}, decoder: {dec_nf}, pool: (1,2,2)',
         'Loss: adjacent NCC + spatial grad + spectral flow smooth',
         '      + gauge (mean flow≈0) + stack variance (Elastix-style balance)',
+        f'Preprocess (chain-aligned): histogram_match={histogram_match}, affine_init={affine_init}',
+        '  window内高→低波长逐对 match_histograms / StackReg（仅优化输入）',
         'Warp: sequential in-place after each window (no flow averaging)',
         'Constraint: adjacent-band NCC only (no cross-gap matching)',
     ])

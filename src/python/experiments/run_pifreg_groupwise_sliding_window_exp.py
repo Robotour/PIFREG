@@ -28,6 +28,8 @@ from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.pif_groupwise_chain import evaluate_chain_pairwise_ncc
 from src.python.registration.pif_groupwise_sliding_window import (
     DEFAULT_EPOCHS_PER_WINDOW,
+    DEFAULT_HISTOGRAM_MATCH,
+    DEFAULT_AFFINE_INIT,
     DEFAULT_LAMDA_GAUGE,
     DEFAULT_LAMDA_SPEC,
     DEFAULT_LAMDA_VAR,
@@ -76,6 +78,8 @@ def run_experiment(
     min_delta=1e-5,
     lr_schedule="cosine",
     lr_min=1e-6,
+    histogram_match=DEFAULT_HISTOGRAM_MATCH,
+    affine_init=DEFAULT_AFFINE_INIT,
 ):
     stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR])
     base_output = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
@@ -114,6 +118,8 @@ def run_experiment(
         "lr_schedule": lr_schedule,
         "lr_min": lr_min,
         "fast_mode": fast_mode,
+        "histogram_match": histogram_match,
+        "affine_init": affine_init,
     }
     config = build_groupwise_config(
         EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
@@ -126,6 +132,7 @@ def run_experiment(
     print("PIFReg Sliding-Window Experiment (balanced, no anchor)")
     print(f"Run folder: {run_dir}")
     print(f"Window: size={window_size}, stride={window_stride}, schedule={schedule}")
+    print(f"Preprocess: histogram_match={histogram_match}, affine_init={affine_init}")
     print(f"Chain NCC before: {chain_before['mean_NCC']:.4f}")
 
     metrics_before = evaluate_stack(bands_norm, eval_ref_band_idx)
@@ -152,6 +159,8 @@ def run_experiment(
         lr_schedule=lr_schedule,
         lr_min=lr_min,
         fast_mode=fast_mode,
+        histogram_match=histogram_match,
+        affine_init=affine_init,
         verbose=True,
     )
     elapsed = time.perf_counter() - t0
@@ -189,6 +198,8 @@ def run_experiment(
             window_stride=window_stride,
             schedule=schedule,
             fast_mode=fast_mode,
+            histogram_match=histogram_match,
+            affine_init=affine_init,
         ),
         bands_raw_before=bands_raw,
         bands_raw_after=bands_raw_after,
@@ -257,6 +268,16 @@ def parse_args():
     p.add_argument("--min-delta", type=float, default=1e-5)
     p.add_argument("--lr-schedule", type=str, default="cosine", choices=["cosine", "plateau", "none"])
     p.add_argument("--lr-min", type=float, default=1e-6)
+    p.add_argument(
+        "--no-histogram-match",
+        action="store_true",
+        help="关闭窗口内直方图匹配（Chain 默认开启）",
+    )
+    p.add_argument(
+        "--affine-init",
+        action="store_true",
+        help="窗口内逐对 StackReg 仿射预配准（Chain 默认关闭）",
+    )
     return p.parse_args()
 
 
@@ -290,4 +311,6 @@ if __name__ == "__main__":
         min_delta=args.min_delta,
         lr_schedule=args.lr_schedule,
         lr_min=args.lr_min,
+        histogram_match=not args.no_histogram_match,
+        affine_init=args.affine_init,
     )

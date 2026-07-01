@@ -37,6 +37,7 @@ from .pif_groupwise_stackflow import (
     sequential_pairwise_ncc_loss,
 )
 from .pif_groupwise_stackflow3d import SpectralStackUnet3d, _upsample_flow_volume
+from .pif_registration import _preprocess_pair
 
 METHOD_NAME = 'PIFReg-SlidingWindow'
 METHOD_FULL_NAME = 'PIFReg Sliding-Window Balanced Registration (3D U-Net)'
@@ -48,6 +49,8 @@ DEFAULT_PATIENCE_PER_WINDOW = (50, 70, 90)
 DEFAULT_LAMDA_SPEC = 0.02
 DEFAULT_LAMDA_GAUGE = 0.05
 DEFAULT_LAMDA_VAR = 0.1
+DEFAULT_HISTOGRAM_MATCH = True
+DEFAULT_AFFINE_INIT = False
 
 SCHEDULE_PYRAMID_THEN_WINDOWS = 'pyramid_then_windows'
 SCHEDULE_WINDOW_THEN_PYRAMID = 'window_then_pyramid'
@@ -83,6 +86,32 @@ def _level_train_params(level_side: int, base_int_steps=3, base_int_downsize=2):
     if level_side <= 32:
         return min(base_int_steps, 2), 1
     return base_int_steps, base_int_downsize
+
+
+def _preprocess_window_bands_chain(
+    window_bands: List[np.ndarray],
+    histogram_match: bool = True,
+    affine_init: bool = False,
+) -> List[np.ndarray]:
+    """
+    与 Chain/PIFReg 一致的窗口内预处理：沿高→低波长逐对处理。
+
+    窗口 band 顺序与全局栈相同（index 越大波长越高）。对 local k，fixed=band[k+1]，
+    moving=band[k]；仅用于优化时的 appearance，不改变随后施加到原图上的 flow 语义。
+    """
+    bands = [b.astype(np.float32).copy() for b in window_bands]
+    w = len(bands)
+    if w <= 1 or (not histogram_match and not affine_init):
+        return bands
+    for k in range(w - 2, -1, -1):
+        fixed = bands[k + 1]
+        moving = bands[k]
+        _, bands[k] = _preprocess_pair(
+            fixed, moving,
+            histogram_match=histogram_match,
+            affine_init=affine_init,
+        )
+    return bands
 
 
 def _warp_stack_all_flows(stack_t: torch.Tensor, flow_vol: torch.Tensor, shape_hw) -> torch.Tensor:
@@ -237,10 +266,15 @@ def _train_window_at_level(
     lr_schedule,
     lr_min,
     verbose,
+    histogram_match: bool = DEFAULT_HISTOGRAM_MATCH,
+    affine_init: bool = DEFAULT_AFFINE_INIT,
 ):
     h, w = window_bands[0].shape
     n_win = len(window_bands)
-    stack_t = _bands_to_tensor(window_bands, device)
+    train_bands = _preprocess_window_bands_chain(
+        window_bands, histogram_match=histogram_match, affine_init=affine_init,
+    )
+    stack_t = _bands_to_tensor(train_bands, device)
     int_steps, int_downsize = _level_train_params(min(h, w), int_steps, int_downsize)
 
     model = WindowBalancedFlowNet3d(
@@ -374,6 +408,8 @@ def _run_pyramid_then_windows(
     lr_schedule,
     lr_min,
     verbose,
+    histogram_match,
+    affine_init,
 ):
     """先空间：每层金字塔内顺序滑动窗口，每窗口结束立即 warp。"""
     for li, (sh, sw) in enumerate(levels):
@@ -398,6 +434,7 @@ def _run_pyramid_then_windows(
                 window_bands, device, ep, pat, lr, lamda, lamda_spec, lamda_gauge, lamda_var,
                 ncc_weight, int_steps, int_downsize, nb_unet_features,
                 early_stop, min_delta, lr_schedule, lr_min, verbose,
+                histogram_match=histogram_match, affine_init=affine_init,
             )
             _apply_window_flows_to_working(
                 working, start, flow_vol, flow_global, device, h, w,
@@ -431,6 +468,8 @@ def _run_window_then_pyramid(
     lr_schedule,
     lr_min,
     verbose,
+    histogram_match,
+    affine_init,
 ):
     """先光谱：每个窗口位置内走完金字塔，再滑动到下一窗口。"""
     for wi, start in enumerate(window_starts):
@@ -466,6 +505,7 @@ def _run_window_then_pyramid(
                 window_bands, device, ep, pat, lr, lamda, lamda_spec, lamda_gauge, lamda_var,
                 ncc_weight, int_steps, int_downsize, nb_unet_features,
                 early_stop, min_delta, lr_schedule, lr_min, verbose,
+                histogram_match=histogram_match, affine_init=affine_init,
             )
 
             if window_flow_cum is None:
@@ -506,6 +546,8 @@ def register_pifreg_groupwise_sliding_window(
     lr_schedule: str = 'cosine',
     lr_min: float = 1e-6,
     fast_mode: bool = True,
+    histogram_match: bool = DEFAULT_HISTOGRAM_MATCH,
+    affine_init: bool = DEFAULT_AFFINE_INIT,
     verbose: bool = True,
     **kwargs,
 ) -> Tuple[List[np.ndarray], Dict[str, Any], np.ndarray]:
@@ -515,6 +557,10 @@ def register_pifreg_groupwise_sliding_window(
     schedule:
         pyramid_then_windows — 每层扫完所有窗口（默认）
         window_then_pyramid  — 每窗口走完整个金字塔
+
+    histogram_match / affine_init:
+        与 Chain/PIFReg 相同，在窗口内沿高→低波长逐对预处理；仅影响优化输入，
+        flow 仍施加于原始强度 working 栈（与 PIFReg 一致）。
     """
     if kwargs:
         ignored = ', '.join(sorted(kwargs))
@@ -557,6 +603,7 @@ def register_pifreg_groupwise_sliding_window(
         print(
             f'{METHOD_NAME}: {n} bands, {n} flows (no anchor), '
             f'window={window_size}, stride={window_stride}, schedule={schedule}, '
+            f'histogram_match={histogram_match}, affine_init={affine_init}, '
             f'network=WindowBalancedFlowNet3d, pyramid={[f"{a}x{b}" for a, b in levels]}'
         )
 
@@ -590,6 +637,8 @@ def register_pifreg_groupwise_sliding_window(
         lr_schedule=lr_schedule,
         lr_min=lr_min,
         verbose=verbose,
+        histogram_match=histogram_match,
+        affine_init=affine_init,
     )
 
     if schedule == SCHEDULE_PYRAMID_THEN_WINDOWS:
@@ -632,6 +681,9 @@ def register_pifreg_groupwise_sliding_window(
         'lr_schedule': lr_schedule,
         'lr_min': lr_min,
         'fast_mode': fast_mode,
+        'histogram_match': histogram_match,
+        'affine_init': affine_init,
+        'preprocess': 'chain-style pairwise within window (high→low wavelength)',
         'network': 'WindowBalancedFlowNet3d (SpectralStackUnet3d)',
         'warp_mode': 'sequential_in_place (no flow averaging)',
         'loss': (
@@ -656,6 +708,8 @@ __all__ = [
     'DEFAULT_LAMDA_SPEC',
     'DEFAULT_LAMDA_GAUGE',
     'DEFAULT_LAMDA_VAR',
+    'DEFAULT_HISTOGRAM_MATCH',
+    'DEFAULT_AFFINE_INIT',
     'SCHEDULE_PYRAMID_THEN_WINDOWS',
     'SCHEDULE_WINDOW_THEN_PYRAMID',
     'register_pifreg_groupwise_sliding_window',
