@@ -482,16 +482,28 @@ def describe_sliding_window_architecture(
     ])
 
 
-def describe_chain_architecture(num_bands, descending=True) -> str:
+def describe_chain_architecture(
+    num_bands,
+    descending=True,
+    schedule='pair_then_pyramid',
+    pyramid_sizes=None,
+) -> str:
     direction = "high→low wavelength" if descending else "low→high wavelength"
+    if schedule == 'pyramid_then_pairs':
+        sched_desc = (
+            f'Pyramid-first: each level scans full chain ({list(pyramid_sizes or (128, 256, 512))}), '
+            f'then next resolution; single-scale PIFReg per pair per level'
+        )
+    else:
+        sched_desc = 'Pair-first: each adjacent pair runs internal multiscale PIFReg (128→512), then next pair'
     return "\n".join([
         "PIFReg Chain Groupwise",
         "=" * 50,
         "",
         f"Bands: {num_bands}",
         f"Chain direction: {direction}",
-        "Method: N-1 independent pairwise PIFReg steps",
-        "Each step: VoxelMorph U-Net pairwise registration",
+        f"Schedule: {schedule} — {sched_desc}",
+        "Method: N-1 pairwise PIFReg steps along wavelength chain",
         "Loss per step: NCC + smoothness (test-time optimization)",
         "Primary metric: mean adjacent-band NCC along chain",
     ])
