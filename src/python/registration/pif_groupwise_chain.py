@@ -103,6 +103,10 @@ def _parse_level_directions_arg(value: Optional[str]) -> Optional[List[bool]]:
     return out
 
 
+def _pairwise_ncc(fixed: np.ndarray, moving: np.ndarray) -> float:
+    return float(compute_NCC(fixed, moving))
+
+
 def _single_scale_pifreg_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """外层金字塔时，每对仅在当前层单尺度优化。"""
     out = dict(kwargs)
