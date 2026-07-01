@@ -28,6 +28,7 @@ from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.pif_groupwise_chain import (
     SCHEDULE_PAIR_THEN_PYRAMID,
     SCHEDULE_PYRAMID_THEN_PAIRS,
+    _parse_level_directions_arg,
     evaluate_chain_pairwise_ncc,
     register_pifreg_chain,
 )
@@ -52,6 +53,8 @@ def run_experiment(
     fast_mode=True,
     schedule=SCHEDULE_PAIR_THEN_PYRAMID,
     pyramid_sizes=None,
+    level_directions=None,
+    alternate_direction=False,
     eval_ref_band_idx=None,
     spectral_path=None,
     save_before_bands=True,
@@ -76,6 +79,11 @@ def run_experiment(
         "descending": True,
         "schedule": schedule,
         "pyramid_sizes": list(pyramid_sizes),
+        "level_directions": (
+            ['690→400' if d else '400→690' for d in level_directions]
+            if level_directions else None
+        ),
+        "alternate_direction": alternate_direction,
     }
     config = build_groupwise_config(
         EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
@@ -90,6 +98,10 @@ def run_experiment(
     print(f"Schedule: {schedule}")
     if schedule == SCHEDULE_PYRAMID_THEN_PAIRS:
         print(f"Pyramid sizes: {list(pyramid_sizes)}")
+        if level_directions:
+            print(f"Level directions: {['690→400' if d else '400→690' for d in level_directions]}")
+        elif alternate_direction:
+            print("Level directions: alternate (690→400 / 400→690 / …)")
     print(f"Chain NCC before: {chain_before['mean_NCC']:.4f}")
 
     metrics_before = evaluate_stack(bands_norm, eval_ref_band_idx)
@@ -101,6 +113,8 @@ def run_experiment(
         wavelengths_nm=wavelengths,
         schedule=schedule,
         pyramid_sizes=pyramid_sizes,
+        level_directions=level_directions,
+        alternate_direction=alternate_direction,
         fast_mode=fast_mode,
         verbose=True,
     )
@@ -129,6 +143,10 @@ def run_experiment(
     ]
     if schedule == SCHEDULE_PYRAMID_THEN_PAIRS:
         chain_section.append(f"- Pyramid sizes: `{list(pyramid_sizes)}`")
+        if reg_info.get("level_directions"):
+            chain_section.append(f"- Level directions: `{reg_info['level_directions']}`")
+        elif alternate_direction:
+            chain_section.append("- Level directions: alternate per pyramid level")
 
     manifest = record_groupwise_experiment(
         run_dir=run_dir,
@@ -138,6 +156,7 @@ def run_experiment(
             descending=True,
             schedule=schedule,
             pyramid_sizes=pyramid_sizes,
+            level_directions=reg_info.get("level_directions"),
         ),
         bands_raw_before=bands_raw,
         bands_raw_after=bands_raw_after,
@@ -191,6 +210,17 @@ def parse_args():
         default=None,
         help="schedule=pyramid_then_pairs 时生效，如 128,256,512",
     )
+    p.add_argument(
+        "--level-directions",
+        type=str,
+        default=None,
+        help="每层链扫方向，逗号分隔 desc/asc，如 desc,asc,desc（仅 pyramid_then_pairs）",
+    )
+    p.add_argument(
+        "--alternate-direction",
+        action="store_true",
+        help="层间交替方向：128 690→400, 256 400→690, 512 690→400（仅 pyramid_then_pairs）",
+    )
     p.add_argument("--eval-ref-band", type=int, default=None)
     p.add_argument("--spectral-path", type=str, default=str(DEFAULT_SPECTRAL_PATH))
     p.add_argument("--no-save-before-bands", action="store_true")
@@ -208,6 +238,8 @@ if __name__ == "__main__":
         fast_mode=not args.no_fast_mode,
         schedule=args.schedule,
         pyramid_sizes=_parse_int_list(args.pyramid_sizes),
+        level_directions=_parse_level_directions_arg(args.level_directions),
+        alternate_direction=args.alternate_direction,
         eval_ref_band_idx=args.eval_ref_band,
         spectral_path=args.spectral_path,
         save_before_bands=not args.no_save_before_bands,

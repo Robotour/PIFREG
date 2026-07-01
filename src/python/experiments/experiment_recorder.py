@@ -487,13 +487,17 @@ def describe_chain_architecture(
     descending=True,
     schedule='pair_then_pyramid',
     pyramid_sizes=None,
+    level_directions=None,
 ) -> str:
     direction = "high→low wavelength" if descending else "low→high wavelength"
     if schedule == 'pyramid_then_pairs':
-        sched_desc = (
-            f'Pyramid-first: each level scans full chain ({list(pyramid_sizes or (128, 256, 512))}), '
-            f'then next resolution; single-scale PIFReg per pair per level'
-        )
+        if level_directions:
+            sched_desc = f'Pyramid-first, per-level directions: {level_directions}'
+        else:
+            sched_desc = (
+                f'Pyramid-first: each level scans full chain '
+                f'({list(pyramid_sizes or (128, 256, 512))}), single-scale PIFReg per pair'
+            )
     else:
         sched_desc = 'Pair-first: each adjacent pair runs internal multiscale PIFReg (128→512), then next pair'
     return "\n".join([
@@ -501,7 +505,7 @@ def describe_chain_architecture(
         "=" * 50,
         "",
         f"Bands: {num_bands}",
-        f"Chain direction: {direction}",
+        f"Default chain direction: {direction}",
         f"Schedule: {schedule} — {sched_desc}",
         "Method: N-1 pairwise PIFReg steps along wavelength chain",
         "Loss per step: NCC + smoothness (test-time optimization)",

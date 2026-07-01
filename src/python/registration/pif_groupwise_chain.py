@@ -61,8 +61,46 @@ def _default_pifreg_kwargs() -> Dict[str, Any]:
     )
 
 
-def _pairwise_ncc(fixed: np.ndarray, moving: np.ndarray) -> float:
-    return float(compute_NCC(fixed, moving))
+def _chain_steps(n: int, descending: bool) -> List[Tuple[int, int]]:
+    """descending: 690→680→…→400；ascending: 400→410→…→690。"""
+    if descending:
+        return [(i + 1, i) for i in range(n - 2, -1, -1)]
+    return [(i - 1, i) for i in range(1, n)]
+
+
+def _resolve_level_directions(
+    num_levels: int,
+    descending: bool,
+    level_directions: Optional[Sequence[bool]] = None,
+    alternate_direction: bool = False,
+) -> List[bool]:
+    """每层链扫方向；alternate 时奇偶层交替（默认 L0 与 descending 一致）。"""
+    if level_directions is not None:
+        dirs = [bool(d) for d in level_directions]
+        while len(dirs) < num_levels:
+            dirs.append(dirs[-1])
+        return dirs[:num_levels]
+    if alternate_direction:
+        return [descending if (li % 2 == 0) else (not descending) for li in range(num_levels)]
+    return [descending] * num_levels
+
+
+def _parse_level_directions_arg(value: Optional[str]) -> Optional[List[bool]]:
+    """解析 'desc,asc,desc' 或 '1,0,1'。"""
+    if value is None:
+        return None
+    tokens = [t.strip().lower() for t in value.split(',') if t.strip()]
+    out: List[bool] = []
+    for t in tokens:
+        if t in ('desc', 'descending', 'down', '690', '1', 'true'):
+            out.append(True)
+        elif t in ('asc', 'ascending', 'up', '400', '0', 'false'):
+            out.append(False)
+        else:
+            raise ValueError(
+                f'Unknown level direction token {t!r}; use desc/asc or 1/0'
+            )
+    return out
 
 
 def _single_scale_pifreg_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -121,11 +159,12 @@ def evaluate_chain_pairwise_ncc(
 def _register_chain_pyramid_first(
     bands: List[np.ndarray],
     device,
-    chain_steps: List[Tuple[int, int]],
-    anchor_idx: int,
     wavelengths_nm: List[str],
     kwargs: Dict[str, Any],
     pyramid_sizes: Tuple[int, ...],
+    descending: bool,
+    level_directions: Optional[Sequence[bool]],
+    alternate_direction: bool,
     verbose: bool,
 ) -> Tuple[List[np.ndarray], List[Dict[str, Any]], Dict[int, np.ndarray]]:
     """先金字塔层级、每层内完整链式扫描（单尺度 PIFReg / 对）。"""
@@ -134,6 +173,9 @@ def _register_chain_pyramid_first(
     n = len(bands)
     h, w = bands[0].shape
     levels = _build_pyramid_levels(h, w, pyramid_sizes)
+    per_level_desc = _resolve_level_directions(
+        len(levels), descending, level_directions, alternate_direction,
+    )
     pair_kwargs = _single_scale_pifreg_kwargs(kwargs)
 
     registered = [b.copy() for b in bands]
@@ -142,17 +184,23 @@ def _register_chain_pyramid_first(
     global_step = 0
 
     if verbose:
+        dir_labels = [
+            '690→400' if d else '400→690' for d in per_level_desc
+        ]
         print(
             f'{METHOD_CHAIN_NAME}: pyramid_then_pairs, '
             f'levels={[f"{a}x{b}" for a, b in levels]}, '
-            f'{len(chain_steps)} pairs/level'
+            f'directions={dir_labels}'
         )
 
     for li, (sh, sw) in enumerate(levels):
+        level_desc = per_level_desc[li]
+        chain_steps = _chain_steps(n, level_desc)
+        dir_label = '690→400' if level_desc else '400→690'
         if verbose:
             print(
                 f'Level {li + 1}/{len(levels)}: {sh}x{sw}, '
-                f'chain sweep ({len(chain_steps)} pairs)'
+                f'chain {dir_label} ({len(chain_steps)} pairs)'
             )
 
         for step, (ref_idx, mov_idx) in enumerate(chain_steps, start=1):
@@ -201,6 +249,8 @@ def _register_chain_pyramid_first(
                 'global_step': global_step,
                 'level': li + 1,
                 'level_size': [sh, sw],
+                'level_descending': level_desc,
+                'level_direction': dir_label,
                 'step_in_level': step,
                 'fixed_index': ref_idx,
                 'moving_index': mov_idx,
@@ -223,6 +273,8 @@ def register_pifreg_chain(
     wavelengths_nm: Optional[Sequence[str]] = None,
     schedule: str = SCHEDULE_PAIR_THEN_PYRAMID,
     pyramid_sizes: Tuple[int, ...] = DEFAULT_PYRAMID_SIZES,
+    level_directions: Optional[Sequence[bool]] = None,
+    alternate_direction: bool = False,
     verbose: bool = True,
     **pifreg_kwargs,
 ) -> Tuple[List[np.ndarray], Dict[str, Any], np.ndarray]:
@@ -232,6 +284,10 @@ def register_pifreg_chain(
     schedule:
         pair_then_pyramid   — 每对 PIFReg 内部多尺度（默认，与原先行为一致）
         pyramid_then_pairs  — 每层分辨率下完整链扫一遍，再进入更细层
+
+    pyramid_then_pairs 专用:
+        level_directions — 每层方向 True=690→400, False=400→690，如 [True,False,True]
+        alternate_direction — 层间交替方向（L0 与 descending 一致）
     """
     bands = _as_band_list(img_list)
     n = len(bands)
@@ -253,15 +309,20 @@ def register_pifreg_chain(
 
     if descending:
         anchor_idx = n - 1
-        chain_steps = [(i + 1, i) for i in range(n - 2, -1, -1)]
+        chain_steps = _chain_steps(n, True)
     else:
         anchor_idx = 0
-        chain_steps = [(i - 1, i) for i in range(1, n)]
+        chain_steps = _chain_steps(n, False)
 
+    per_level_desc = None
     if schedule == SCHEDULE_PYRAMID_THEN_PAIRS:
         registered, step_logs, flows_by_band = _register_chain_pyramid_first(
-            bands, device, chain_steps, anchor_idx, list(wavelengths_nm),
-            kwargs, pyramid_sizes, verbose,
+            bands, device, list(wavelengths_nm), kwargs, pyramid_sizes,
+            descending, level_directions, alternate_direction, verbose,
+        )
+        levels = _build_pyramid_levels(bands[0].shape[0], bands[0].shape[1], pyramid_sizes)
+        per_level_desc = _resolve_level_directions(
+            len(levels), descending, level_directions, alternate_direction,
         )
     else:
         if verbose:
@@ -330,5 +391,10 @@ def register_pifreg_chain(
         'pifreg_kwargs': {k: v for k, v in kwargs.items() if k != 'save_model_path'},
         'pyramid_sizes': list(pyramid_sizes) if schedule == SCHEDULE_PYRAMID_THEN_PAIRS else None,
         'pyramid_levels': [list(lv) for lv in levels] if levels else None,
+        'level_directions': (
+            ['690→400' if d else '400→690' for d in per_level_desc]
+            if schedule == SCHEDULE_PYRAMID_THEN_PAIRS else None
+        ),
+        'alternate_direction': alternate_direction if schedule == SCHEDULE_PYRAMID_THEN_PAIRS else None,
     }
     return registered, info, flow_stack
