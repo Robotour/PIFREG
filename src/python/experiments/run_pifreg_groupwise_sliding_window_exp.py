@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PIFReg 滑动窗口相邻联合配准实验 — 标准实验记录。"""
+"""PIFReg 滑动窗口均衡配准实验 — 无锚点 3D U-Net + 顺序 warp。"""
 
 import argparse
 import sys
@@ -28,16 +28,16 @@ from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.pif_groupwise_chain import evaluate_chain_pairwise_ncc
 from src.python.registration.pif_groupwise_sliding_window import (
     DEFAULT_EPOCHS_PER_WINDOW,
+    DEFAULT_LAMDA_GAUGE,
     DEFAULT_LAMDA_SPEC,
+    DEFAULT_LAMDA_VAR,
     DEFAULT_PATIENCE_PER_WINDOW,
-    DEFAULT_SPECTRAL_ENC_CHANNELS,
-    DEFAULT_SPECTRAL_ENC_KERNEL,
     DEFAULT_WINDOW_SIZE,
     DEFAULT_WINDOW_STRIDE,
-    FEATURE_MODE_MEAN_ANCHOR,
-    FEATURE_MODE_SPECTRAL_ENCODER,
+    SCHEDULE_PYRAMID_THEN_WINDOWS,
+    SCHEDULE_WINDOW_THEN_PYRAMID,
     register_pifreg_groupwise_sliding_window,
-    warp_bands_with_flow_stack,
+    warp_bands_with_flow_volume,
 )
 from src.python.registration.pif_groupwise_stackflow import DEFAULT_PYRAMID_SIZES
 
@@ -54,9 +54,9 @@ def run_experiment(
     exp_name="run",
     image_size=(512, 512),
     device="cuda",
-    anchor_band=-1,
     window_size=DEFAULT_WINDOW_SIZE,
     window_stride=DEFAULT_WINDOW_STRIDE,
+    schedule=SCHEDULE_PYRAMID_THEN_WINDOWS,
     fast_mode=True,
     eval_ref_band_idx=None,
     spectral_path=None,
@@ -67,6 +67,8 @@ def run_experiment(
     lr=2e-4,
     lamda=0.005,
     lamda_spec=DEFAULT_LAMDA_SPEC,
+    lamda_gauge=DEFAULT_LAMDA_GAUGE,
+    lamda_var=DEFAULT_LAMDA_VAR,
     ncc_weight=1.0,
     int_steps=3,
     int_downsize=2,
@@ -74,9 +76,6 @@ def run_experiment(
     min_delta=1e-5,
     lr_schedule="cosine",
     lr_min=1e-6,
-    feature_mode=FEATURE_MODE_MEAN_ANCHOR,
-    spectral_enc_channels=DEFAULT_SPECTRAL_ENC_CHANNELS,
-    spectral_enc_kernel=DEFAULT_SPECTRAL_ENC_KERNEL,
 ):
     stack_dir = resolve_path(stack_dir, PROJECT_ROOT, [DATA_DIR])
     base_output = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
@@ -92,20 +91,21 @@ def run_experiment(
         stack_dir, image_size=image_size, return_wavelengths=True,
     )
     n_bands = len(bands_norm)
-    anchor_band = int(anchor_band) % n_bands
     if eval_ref_band_idx is None:
         eval_ref_band_idx = n_bands // 2
 
     registration_kwargs = {
-        "anchor_band_idx": anchor_band,
         "window_size": window_size,
         "window_stride": window_stride,
+        "schedule": schedule,
         "pyramid_sizes": list(pyramid_sizes),
         "epochs_per_window": epochs_per_window,
         "patience_per_window": patience_per_window,
         "lr": lr,
         "lamda": lamda,
         "lamda_spec": lamda_spec,
+        "lamda_gauge": lamda_gauge,
+        "lamda_var": lamda_var,
         "ncc_weight": ncc_weight,
         "int_steps": int_steps,
         "int_downsize": int_downsize,
@@ -114,37 +114,36 @@ def run_experiment(
         "lr_schedule": lr_schedule,
         "lr_min": lr_min,
         "fast_mode": fast_mode,
-        "feature_mode": feature_mode,
-        "spectral_enc_channels": spectral_enc_channels,
-        "spectral_enc_kernel": spectral_enc_kernel,
     }
     config = build_groupwise_config(
         EXPERIMENT_ID, exp_name, stack_dir, image_size, device, n_bands,
         band_files, eval_ref_band_idx, spectral_path, registration_kwargs,
-        anchor_band=anchor_band,
+        anchor_band=None,
     )
 
     chain_before = evaluate_chain_pairwise_ncc(bands_norm, wavelengths, descending=True)
     print("=" * 60)
-    print("PIFReg Sliding-Window Groupwise Experiment")
+    print("PIFReg Sliding-Window Experiment (balanced, no anchor)")
     print(f"Run folder: {run_dir}")
-    print(f"Window: size={window_size}, stride={window_stride}")
+    print(f"Window: size={window_size}, stride={window_stride}, schedule={schedule}")
     print(f"Chain NCC before: {chain_before['mean_NCC']:.4f}")
 
     metrics_before = evaluate_stack(bands_norm, eval_ref_band_idx)
     t0 = time.perf_counter()
-    bands_norm_after, reg_info, flow_stack = register_pifreg_groupwise_sliding_window(
+    bands_norm_after, reg_info, flow_volume = register_pifreg_groupwise_sliding_window(
         bands_norm,
         device=str(device),
-        anchor_band_idx=anchor_band,
         window_size=window_size,
         window_stride=window_stride,
+        schedule=schedule,
         pyramid_sizes=pyramid_sizes,
         epochs_per_window=epochs_per_window,
         patience_per_window=patience_per_window,
         lr=lr,
         lamda=lamda,
         lamda_spec=lamda_spec,
+        lamda_gauge=lamda_gauge,
+        lamda_var=lamda_var,
         ncc_weight=ncc_weight,
         int_steps=int_steps,
         int_downsize=int_downsize,
@@ -153,9 +152,6 @@ def run_experiment(
         lr_schedule=lr_schedule,
         lr_min=lr_min,
         fast_mode=fast_mode,
-        feature_mode=feature_mode,
-        spectral_enc_channels=spectral_enc_channels,
-        spectral_enc_kernel=spectral_enc_kernel,
         verbose=True,
     )
     elapsed = time.perf_counter() - t0
@@ -165,8 +161,8 @@ def run_experiment(
     metrics_after = evaluate_stack(bands_norm_after, eval_ref_band_idx)
     metrics_summary = compare_metrics(metrics_before, metrics_after)
 
-    bands_raw_after = warp_bands_with_flow_stack(
-        bands_raw, flow_stack, anchor_band_idx=anchor_band, device=str(device),
+    bands_raw_after = warp_bands_with_flow_volume(
+        bands_raw, flow_volume, device=str(device),
     )
 
     chain_section = [
@@ -176,6 +172,11 @@ def run_experiment(
         f"- Before: {chain_before['mean_NCC']:.4f}",
         f"- After: {chain_after['mean_NCC']:.4f}",
         f"- Delta: {chain_after['mean_NCC'] - chain_before['mean_NCC']:+.4f}",
+        "",
+        "## Schedule",
+        "",
+        f"- Mode: `{schedule}`",
+        f"- Warp: sequential in-place (no flow averaging)",
     ]
 
     manifest = record_groupwise_experiment(
@@ -184,12 +185,10 @@ def run_experiment(
         architecture_text=describe_sliding_window_architecture(
             image_size=image_size,
             num_bands=n_bands,
-            anchor_band_idx=anchor_band,
             window_size=window_size,
             window_stride=window_stride,
+            schedule=schedule,
             fast_mode=fast_mode,
-            feature_mode=feature_mode,
-            spectral_enc_channels=spectral_enc_channels,
         ),
         bands_raw_before=bands_raw,
         bands_raw_after=bands_raw_after,
@@ -200,9 +199,9 @@ def run_experiment(
         metrics_after=metrics_after,
         metrics_summary=metrics_summary,
         elapsed_seconds=elapsed,
-        flow_stack=flow_stack,
-        moving_band_indices=reg_info.get("moving_band_indices"),
-        anchor_band_idx=anchor_band,
+        flow_stack=flow_volume,
+        moving_band_indices=list(range(n_bands)),
+        anchor_band_idx=eval_ref_band_idx,
         save_before_bands=save_before_bands,
         rgb_title_after="RGB After PIFReg Sliding Window",
         summary_extra_sections=chain_section,
@@ -222,7 +221,7 @@ def _parse_int_list(value):
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="PIFReg sliding-window adjacent joint groupwise registration",
+        description="PIFReg sliding-window balanced groupwise registration (3D U-Net)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--stack-dir", type=str, default=str(DEFAULT_STACK_DIR))
@@ -230,20 +229,18 @@ def parse_args():
     p.add_argument("--exp-name", type=str, default="run")
     p.add_argument("--image-size", type=int, nargs=2, default=[512, 512], metavar=("W", "H"))
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--anchor-band", type=int, default=-1)
     p.add_argument("--window-size", type=int, default=DEFAULT_WINDOW_SIZE)
     p.add_argument("--window-stride", type=int, default=DEFAULT_WINDOW_STRIDE)
+    p.add_argument(
+        "--schedule",
+        type=str,
+        default=SCHEDULE_PYRAMID_THEN_WINDOWS,
+        choices=[SCHEDULE_PYRAMID_THEN_WINDOWS, SCHEDULE_WINDOW_THEN_PYRAMID],
+        help="pyramid_then_windows=先空间后光谱; window_then_pyramid=先光谱后空间",
+    )
     p.add_argument("--eval-ref-band", type=int, default=None)
     p.add_argument("--spectral-path", type=str, default=str(DEFAULT_SPECTRAL_PATH))
     p.add_argument("--no-save-before-bands", action="store_true")
-    p.add_argument(
-        "--feature-mode",
-        type=str,
-        default=FEATURE_MODE_MEAN_ANCHOR,
-        choices=[FEATURE_MODE_MEAN_ANCHOR, FEATURE_MODE_SPECTRAL_ENCODER],
-    )
-    p.add_argument("--spectral-enc-channels", type=int, default=DEFAULT_SPECTRAL_ENC_CHANNELS)
-    p.add_argument("--spectral-enc-kernel", type=int, default=DEFAULT_SPECTRAL_ENC_KERNEL)
     p.add_argument("--no-fast-mode", action="store_true")
     p.add_argument("--pyramid-sizes", type=str, default=None)
     p.add_argument("--epochs-per-window", type=str, default=None)
@@ -251,6 +248,8 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--lamda", type=float, default=0.005)
     p.add_argument("--lamda-spec", type=float, default=DEFAULT_LAMDA_SPEC)
+    p.add_argument("--lamda-gauge", type=float, default=DEFAULT_LAMDA_GAUGE)
+    p.add_argument("--lamda-var", type=float, default=DEFAULT_LAMDA_VAR)
     p.add_argument("--ncc-weight", type=float, default=1.0)
     p.add_argument("--int-steps", type=int, default=3)
     p.add_argument("--int-downsize", type=int, default=2)
@@ -269,9 +268,9 @@ if __name__ == "__main__":
         exp_name=args.exp_name,
         image_size=tuple(args.image_size),
         device=args.device,
-        anchor_band=args.anchor_band,
         window_size=args.window_size,
         window_stride=args.window_stride,
+        schedule=args.schedule,
         fast_mode=not args.no_fast_mode,
         eval_ref_band_idx=args.eval_ref_band,
         spectral_path=args.spectral_path,
@@ -282,6 +281,8 @@ if __name__ == "__main__":
         lr=args.lr,
         lamda=args.lamda,
         lamda_spec=args.lamda_spec,
+        lamda_gauge=args.lamda_gauge,
+        lamda_var=args.lamda_var,
         ncc_weight=args.ncc_weight,
         int_steps=args.int_steps,
         int_downsize=args.int_downsize,
@@ -289,7 +290,4 @@ if __name__ == "__main__":
         min_delta=args.min_delta,
         lr_schedule=args.lr_schedule,
         lr_min=args.lr_min,
-        feature_mode=args.feature_mode,
-        spectral_enc_channels=args.spectral_enc_channels,
-        spectral_enc_kernel=args.spectral_enc_kernel,
     )

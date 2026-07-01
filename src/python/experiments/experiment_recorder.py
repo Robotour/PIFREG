@@ -440,12 +440,10 @@ def describe_joint_architecture(image_size, num_bands, ref_band_idx=None, fast_m
 def describe_sliding_window_architecture(
     image_size,
     num_bands,
-    anchor_band_idx=-1,
     window_size=5,
     window_stride=1,
+    schedule='pyramid_then_windows',
     fast_mode=True,
-    feature_mode='mean_anchor',
-    spectral_enc_channels=4,
 ) -> str:
     h, w = image_size
     enc_nf, dec_nf = compact_unet_features() if fast_mode else default_unet_features()
@@ -453,24 +451,27 @@ def describe_sliding_window_architecture(
     n_windows = max(1, num_bands - n_win + 1) if num_bands > n_win else 1
     if num_bands > n_win:
         n_windows = len(range(0, num_bands - n_win + 1, max(1, window_stride)))
-    feat = (
-        f'spectral_encoder(K={spectral_enc_channels}) + window anchor'
-        if feature_mode == 'spectral_encoder'
-        else 'stack mean + window anchor'
+    schedule_desc = (
+        'pyramid level → scan all windows (spatial-first)'
+        if schedule == 'pyramid_then_windows'
+        else 'window position → full pyramid 128→512 (spectral-first)'
     )
     return '\n'.join([
-        'PIFReg Sliding-Window Adjacent Joint Registration',
+        'PIFReg Sliding-Window Balanced Registration (v2)',
         '=' * 50,
         '',
-        f'Bands: {num_bands}, global anchor index: {anchor_band_idx}',
-        f'Window size: {n_win} bands → {n_win - 1} flows per window',
-        f'Window stride: {window_stride} ({n_windows} windows / pyramid level)',
-        f'Backbone: PerBandStackFlowNet (2D U-Net) per window',
-        f'U-Net inshape=({h}, {w}), input features: {feat}',
-        f'  encoder: {enc_nf}, decoder: {dec_nf}',
-        'Loss per window: adjacent NCC mean + spatial flow grad + spectral flow smooth',
-        'Merge: average overlapping flow estimates across windows',
-        'Constraint: adjacent-band similarity only (no cross-band matching)',
+        f'Bands: {num_bands}, flows: {num_bands} (no anchor, balanced per-band warp)',
+        f'Window size: {n_win} bands → {n_win} flows per window',
+        f'Window stride: {window_stride} ({n_windows} window positions)',
+        f'Schedule: {schedule} — {schedule_desc}',
+        'Backbone: WindowBalancedFlowNet3d (SpectralStackUnet3d)',
+        f'Input: (1, 1, {n_win}, {h}, {w}) full window cube',
+        f'Output: (1, {n_win}, 2, H, W) per-band 2D flows',
+        f'  encoder: {enc_nf}, decoder: {dec_nf}, pool: (1,2,2)',
+        'Loss: adjacent NCC + spatial grad + spectral flow smooth',
+        '      + gauge (mean flow≈0) + stack variance (Elastix-style balance)',
+        'Warp: sequential in-place after each window (no flow averaging)',
+        'Constraint: adjacent-band NCC only (no cross-gap matching)',
     ])
 
 
