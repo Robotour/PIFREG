@@ -94,15 +94,28 @@ def interpolate_flows_spectral(
 ) -> Dict[int, np.ndarray]:
     """
     对非关键帧波段，在相邻关键帧 absolute flow 之间按索引线性插值。
+    锚点波段 flow 视为零（恒等变换），作为插值端点。
     """
     kf = sorted(set(keyframe_indices))
-    if anchor_idx not in abs_flows and anchor_idx in kf:
-        raise ValueError('anchor band must not require a flow')
+
+    if anchor_idx in abs_flows:
+        raise ValueError('anchor band must not have a flow entry in abs_flows')
+
+    for idx in kf:
+        if idx != anchor_idx and idx not in abs_flows:
+            raise ValueError(f'missing absolute flow for keyframe band {idx}')
 
     out: Dict[int, np.ndarray] = {}
     for idx in kf:
         if idx != anchor_idx:
             out[idx] = abs_flows[idx].astype(np.float32)
+
+    sample_flow = next(iter(out.values()))
+
+    def _flow_at(band_idx: int) -> np.ndarray:
+        if band_idx == anchor_idx:
+            return np.zeros_like(sample_flow)
+        return out[band_idx]
 
     for j in range(num_bands):
         if j == anchor_idx or j in out:
@@ -110,10 +123,10 @@ def interpolate_flows_spectral(
         lo = max(i for i in kf if i <= j)
         hi = min(i for i in kf if i >= j)
         if lo == hi:
-            out[j] = out[lo].copy()
+            out[j] = _flow_at(lo).copy()
             continue
         t = (j - lo) / float(hi - lo)
-        out[j] = ((1.0 - t) * out[lo] + t * out[hi]).astype(np.float32)
+        out[j] = ((1.0 - t) * _flow_at(lo) + t * _flow_at(hi)).astype(np.float32)
     return out
 
 
