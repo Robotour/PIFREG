@@ -275,6 +275,8 @@ def _train_stackflow3d_at_level(
     lr_schedule,
     lr_min,
     verbose,
+    log_every=None,
+    log_prefix='',
 ):
     h, w = bands[0].shape
     n = len(bands)
@@ -300,7 +302,11 @@ def _train_stackflow3d_at_level(
     best_flow_vol = None
     best_state = None
     stale_epochs = 0
-    log_every = max(max_epochs // 10, 1)
+    if log_every is None:
+        log_every = max(max_epochs // 10, 1)
+    else:
+        log_every = max(int(log_every), 1)
+    prefix = log_prefix or ''
 
     for epoch in range(max_epochs):
         model.train()
@@ -334,13 +340,17 @@ def _train_stackflow3d_at_level(
         if verbose and (epoch % log_every == 0 or epoch == max_epochs - 1):
             lr_now = optimizer.param_groups[0]['lr']
             print(
-                f'    epoch {epoch + 1}/{max_epochs}: loss={current_loss:.4f} '
-                f'best={best_loss:.4f} lr={lr_now:.2e}'
+                f'{prefix}    epoch {epoch + 1}/{max_epochs}: loss={current_loss:.4f} '
+                f'best={best_loss:.4f} lr={lr_now:.2e}',
+                flush=True,
             )
 
         if early_stop and stale_epochs >= patience:
             if verbose:
-                print(f'    early stop @ epoch {epoch + 1} (best={best_loss:.4f})')
+                print(
+                    f'{prefix}    early stop @ epoch {epoch + 1} (best={best_loss:.4f})',
+                    flush=True,
+                )
             break
 
     if best_state is not None:

@@ -162,17 +162,19 @@ def register_pifreg_groupwise_spatial_window(
             f'{METHOD_NAME}: {n} bands, {h}x{w}, anchor={anchor_band_idx}, '
             f'window={win}x{win}, stride={stride}, '
             f'grid={len(y_starts)}x{len(x_starts)}={num_windows} windows, '
-            f'max_epochs/window={max_epochs}, patience={patience}'
+            f'max_epochs/window={max_epochs}, patience={patience}',
+            flush=True,
         )
 
     flow_sum = np.zeros((n, 2, h, w), dtype=np.float64)
     weight_sum = np.zeros((h, w), dtype=np.float64)
 
     for wi, (y0, x0, ph, pw) in enumerate(windows):
+        window_label = f'Window {wi + 1}/{num_windows}'
         if verbose:
             print(
-                f'  Window {wi + 1}/{num_windows}: '
-                f'y=[{y0}:{y0 + ph}), x=[{x0}:{x0 + pw})'
+                f'  {window_label}: y=[{y0}:{y0 + ph}), x=[{x0}:{x0 + pw})',
+                flush=True,
             )
 
         patch_bands = _crop_stack(bands, y0, x0, ph, pw)
@@ -192,7 +194,9 @@ def register_pifreg_groupwise_spatial_window(
             min_delta,
             lr_schedule,
             lr_min,
-            verbose=False,
+            verbose=verbose,
+            log_every=10,
+            log_prefix=f'  [{window_label}] ',
         )
 
         if ph != flow_vol.shape[-2] or pw != flow_vol.shape[-1]:
