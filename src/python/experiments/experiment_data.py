@@ -217,15 +217,17 @@ def warp_bands_with_shared_flow(bands_raw, flow_2hw: np.ndarray, device: str = "
     return out
 
 
-def pairwise_metrics_dict(fixed, moving, warped, keys=("MI", "NCC", "NTG")):
+def pairwise_metrics_dict(fixed, moving, warped, keys=("MI", "NMI", "NCC", "NTG")):
     """Pairwise 指标 before/after 字典。"""
     before = {
         "MI": float(compute_MI(fixed, moving)),
+        "NMI": float(compute_NMI(fixed, moving)),
         "NCC": float(compute_NCC(fixed, moving)),
         "NTG": float(compute_NTG(fixed, moving)),
     }
     after = {
         "MI": float(compute_MI(fixed, warped)),
+        "NMI": float(compute_NMI(fixed, warped)),
         "NCC": float(compute_NCC(fixed, warped)),
         "NTG": float(compute_NTG(fixed, warped)),
     }

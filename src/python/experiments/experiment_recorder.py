@@ -250,6 +250,102 @@ def _band_to_uint8(band: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
+def compute_pairwise_error_maps(
+    fixed_raw: np.ndarray,
+    moving_raw: np.ndarray,
+    warped_raw: np.ndarray,
+    normalized: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """计算 fixed 与 moving/warped 的逐像素绝对误差图（默认归一化到 [0, 1]）。"""
+    fixed_u8 = _band_to_uint8(fixed_raw).astype(np.float32)
+    moving_u8 = _band_to_uint8(moving_raw).astype(np.float32)
+    warped_u8 = _band_to_uint8(warped_raw).astype(np.float32)
+    error_before = np.abs(fixed_u8 - moving_u8)
+    error_after = np.abs(fixed_u8 - warped_u8)
+    if normalized:
+        error_before = error_before / 255.0
+        error_after = error_after / 255.0
+    return error_before, error_after
+
+
+def save_pairwise_error_heatmaps(
+    output_dir: Path,
+    fixed_raw: np.ndarray,
+    moving_raw: np.ndarray,
+    warped_raw: np.ndarray,
+    vmax: float = 0.1,
+    method_name: Optional[str] = None,
+) -> Dict[str, Path]:
+    """保存配准前后误差热图及五联对比图到 images/ 目录。"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    error_before, error_after = compute_pairwise_error_maps(
+        fixed_raw, moving_raw, warped_raw, normalized=True,
+    )
+    np.save(output_dir / "error_before.npy", error_before.astype(np.float32))
+    np.save(output_dir / "error_after.npy", error_after.astype(np.float32))
+
+    paths: Dict[str, Path] = {}
+
+    for name, err, title in [
+        ("error_before", error_before, "Error Before"),
+        ("error_after", error_after, "Error After"),
+    ]:
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(err, cmap="jet", vmin=0, vmax=vmax)
+        ax.set_title(title)
+        ax.axis("off")
+        plt.colorbar(im, ax=ax, fraction=0.046)
+        plt.tight_layout()
+        path = output_dir / f"{name}.png"
+        plt.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close()
+        paths[name] = path
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    im0 = axes[0].imshow(error_before, cmap="jet", vmin=0, vmax=vmax)
+    axes[0].set_title("Error Before")
+    axes[0].axis("off")
+    im1 = axes[1].imshow(error_after, cmap="jet", vmin=0, vmax=vmax)
+    axes[1].set_title("Error After")
+    axes[1].axis("off")
+    fig.colorbar(im1, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
+    fig.subplots_adjust(wspace=0.15)
+    paths["error_compare"] = output_dir / "error_compare.png"
+    plt.savefig(paths["error_compare"], dpi=150, bbox_inches="tight")
+    plt.close()
+
+    fig = plt.figure(figsize=(15, 5))
+    if method_name:
+        fig.suptitle(f"Registration Results - {method_name}")
+    for i, (title, img) in enumerate(
+        [("Fixed", fixed_raw), ("Moving", moving_raw), ("Warped", warped_raw)],
+        start=1,
+    ):
+        ax = fig.add_subplot(1, 5, i)
+        ax.imshow(_band_to_uint8(img), cmap="gray")
+        ax.set_title(title)
+        ax.axis("off")
+    ax4 = fig.add_subplot(1, 5, 4)
+    ax4.imshow(error_before, cmap="jet", vmin=0, vmax=vmax)
+    ax4.set_title("Error Before")
+    ax4.axis("off")
+    ax5 = fig.add_subplot(1, 5, 5)
+    im5 = ax5.imshow(error_after, cmap="jet", vmin=0, vmax=vmax)
+    ax5.set_title("Error After")
+    ax5.axis("off")
+    fig.colorbar(im5, ax=[ax4, ax5], fraction=0.03, pad=0.02)
+    fig.subplots_adjust(wspace=0.25, top=0.88 if method_name else 0.95)
+    paths["registration_overview"] = output_dir / "registration_overview.png"
+    plt.savefig(paths["registration_overview"], dpi=150, bbox_inches="tight")
+    plt.close()
+
+    paths["error_before_npy"] = output_dir / "error_before.npy"
+    paths["error_after_npy"] = output_dir / "error_after.npy"
+    return paths
+
+
 def flow_to_color_image(flow_xy: np.ndarray) -> np.ndarray:
     """位移场 (2, H, W) → RGB 彩色编码图 (H, W, 3) uint8。"""
     fx = flow_xy[0].astype(np.float32)
@@ -527,7 +623,9 @@ def describe_stackflow3d_architecture(image_size, num_bands, anchor_band_idx=0, 
     ])
 
 
-def describe_pairwise_architecture(image_size, fast_mode=False, multiscale=True) -> str:
+def describe_pairwise_architecture(
+    image_size, fast_mode=False, multiscale=True, multiscale_mode='sequential',
+) -> str:
     h, w = image_size
     enc_nf, dec_nf = compact_unet_features() if fast_mode else default_unet_features()
     return "\n".join([
@@ -537,7 +635,7 @@ def describe_pairwise_architecture(image_size, fast_mode=False, multiscale=True)
         "Backbone: VxmDense (VoxelMorph 2D U-Net)",
         f"Input: fixed + moving concat → (1, 2, {h}, {w})",
         f"  encoder: {enc_nf}, decoder: {dec_nf}",
-        f"Multiscale pyramid: {multiscale}",
+        f"Multiscale pyramid: {multiscale} (mode={multiscale_mode})",
         "Affine init: StackReg + optional histogram matching",
         "Loss: NCC + flow smoothness (test-time optimization)",
     ])
@@ -667,6 +765,15 @@ def record_pairwise_experiment(
     plt.savefig(images_dir / "compare.png", dpi=150, bbox_inches="tight")
     plt.close()
 
+    method_label = config.get("method") or config.get("experiment", "pairwise")
+    error_paths = save_pairwise_error_heatmaps(
+        images_dir,
+        fixed_raw,
+        moving_raw,
+        warped_raw,
+        method_name=str(method_label),
+    )
+
     rel = lambda p: str(p.relative_to(run_dir))  # noqa: E731
     output_index = {
         "config": rel(run_dir / "config.json"),
@@ -677,6 +784,12 @@ def record_pairwise_experiment(
         "moving": rel(images_dir / "moving.png"),
         "warped": rel(images_dir / "warped.png"),
         "compare": rel(images_dir / "compare.png"),
+        "error_before": rel(error_paths["error_before"]),
+        "error_after": rel(error_paths["error_after"]),
+        "error_compare": rel(error_paths["error_compare"]),
+        "registration_overview": rel(error_paths["registration_overview"]),
+        "error_before_npy": rel(error_paths["error_before_npy"]),
+        "error_after_npy": rel(error_paths["error_after_npy"]),
     }
     if flow is not None and flow.size > 0:
         flows_dir = run_dir / "flows"

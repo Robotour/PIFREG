@@ -12,7 +12,7 @@ from skimage.exposure import match_histograms
 from ..losses.registration_losses import NCC, Grad
 from ..voxelmorph import VxmDense
 from ..voxelmorph.config import compact_unet_features, default_unet_features
-from ..voxelmorph.layers import SpatialTransformer
+from ..voxelmorph.layers import SpatialTransformer, VecInt
 from ..voxelmorph.losses import MSE
 
 METHOD_NAME = 'PIFReg'
@@ -63,6 +63,49 @@ def _apply_flow_to_image(moving_image, flow, device):
     with torch.no_grad():
         warped = transformer(m, flow)
     return warped.squeeze().cpu().numpy().astype(np.float32)
+
+
+def _apply_flow_to_tensor(moving_tensor, flow, device):
+    """可微版本：用位移场 warp 移动图像张量 (B,1,H,W)。"""
+    h, w = moving_tensor.shape[2], moving_tensor.shape[3]
+    transformer = SpatialTransformer((h, w)).to(device)
+    return transformer(moving_tensor, flow)
+
+
+def _images_to_tensors(fixed_image, moving_image, device):
+    f = torch.tensor(fixed_image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+    m = torch.tensor(moving_image, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+    return f, m
+
+
+def _forward_vxm_dynamic(model, source, target, int_downsize, registration=False):
+    """在 source/target 当前空间尺寸上运行 VxmDense（U-Net 权重共享，变换层按尺寸动态创建）。"""
+    device = source.device
+    sh, sw = source.shape[2], source.shape[3]
+
+    x = torch.cat([source, target], dim=1)
+    x = model.unet_model(x)
+    flow_field = model.flow(x)
+
+    pos_flow = flow_field
+    if model.resize is not None:
+        pos_flow = model.resize(pos_flow)
+    preint_flow = pos_flow
+
+    nsteps = model.integrate.nsteps if model.integrate is not None else 0
+    if nsteps > 0:
+        down_shape = [max(int(sh / int_downsize), 1), max(int(sw / int_downsize), 1)]
+        integrator = VecInt(down_shape, nsteps).to(device)
+        pos_flow = integrator(pos_flow)
+        if model.fullsize is not None:
+            pos_flow = model.fullsize(pos_flow)
+
+    transformer = SpatialTransformer((sh, sw)).to(device)
+    y_source = transformer(source, pos_flow)
+
+    if registration:
+        return y_source, pos_flow
+    return y_source, preint_flow, pos_flow
 
 
 def _build_flow_model(
@@ -244,11 +287,7 @@ def _register_multiscale(
 ):
     """多尺度配准：各尺度下采样优化，位移场上采样组合，最终对原图 warp 一次。"""
     h, w = fixed_original.shape
-    active_scales = [s for s in scales if int(h * s) >= 32 and int(w * s) >= 32]
-    if not active_scales:
-        active_scales = [1.0]
-    if active_scales[-1] != 1.0:
-        active_scales.append(1.0)
+    active_scales = _resolve_active_scales(h, w, scales)
 
     print(
         f'{METHOD_NAME}: multiscale {active_scales}, '
@@ -291,6 +330,189 @@ def _register_multiscale(
     return warped, flow_full
 
 
+def _resolve_active_scales(h, w, scales):
+    active_scales = [s for s in scales if int(h * s) >= 32 and int(w * s) >= 32]
+    if not active_scales:
+        active_scales = [1.0]
+    if active_scales[-1] != 1.0:
+        active_scales.append(1.0)
+    return active_scales
+
+
+def _unrolled_pyramid_forward(
+    model,
+    fixed_original,
+    moving_original,
+    device,
+    scales,
+    int_downsize,
+    image_loss_fn,
+    grad_loss_fn,
+    lamda,
+    registration=False,
+):
+    """单 epoch 内 unrolled 金字塔：128→256→512 连续预测、组合位移场并累计 loss。"""
+    h, w = fixed_original.shape
+    active_scales = _resolve_active_scales(h, w, scales)
+
+    f_full, m_full = _images_to_tensors(fixed_original, moving_original, device)
+    flow_at_scale = None
+    total_loss = None
+
+    for scale in active_scales:
+        sh, sw = int(h * scale), int(w * scale)
+        f_s = torch.nn.functional.interpolate(
+            f_full, size=(sh, sw), mode='bilinear', align_corners=True,
+        )
+        m_s = torch.nn.functional.interpolate(
+            m_full, size=(sh, sw), mode='bilinear', align_corners=True,
+        )
+
+        if flow_at_scale is not None:
+            flow_on_scale = _upsample_flow(flow_at_scale, sh, sw)
+            m_s = _apply_flow_to_tensor(m_s, flow_on_scale, device)
+
+        if registration:
+            _, pos_flow = _forward_vxm_dynamic(
+                model, m_s, f_s, int_downsize, registration=True,
+            )
+        else:
+            warped, preint_flow, pos_flow = _forward_vxm_dynamic(
+                model, m_s, f_s, int_downsize, registration=False,
+            )
+            scale_loss = image_loss_fn(f_s, warped) + lamda * grad_loss_fn(None, preint_flow)
+            total_loss = scale_loss if total_loss is None else total_loss + scale_loss
+
+        if flow_at_scale is None:
+            flow_at_scale = pos_flow
+        else:
+            flow_prev = _upsample_flow(flow_at_scale, sh, sw)
+            flow_at_scale = _compose_flows(flow_prev, pos_flow, (sh, sw), device)
+
+    flow_full = _upsample_flow(flow_at_scale, h, w)
+    if registration:
+        return flow_full
+    return total_loss, flow_full
+
+
+def _register_multiscale_unrolled(
+    fixed_original,
+    moving_original,
+    device,
+    max_epochs,
+    lr,
+    lamda,
+    int_steps,
+    int_downsize,
+    image_loss,
+    scales,
+    early_stop,
+    patience,
+    min_delta,
+    lr_schedule,
+    lr_gamma,
+    lr_min,
+    save_model_path=None,
+    nb_unet_features=None,
+):
+    """多尺度 unrolled 配准：同一 U-Net 权重，每个 epoch 内走完 128→256→512 再 backward。"""
+    h, w = fixed_original.shape
+    active_scales = _resolve_active_scales(h, w, scales)
+
+    print(
+        f'{METHOD_NAME}: unrolled multiscale {active_scales}, '
+        f'up to {max_epochs} epochs, early_stop={early_stop}'
+    )
+
+    finest_h, finest_w = int(h * active_scales[-1]), int(w * active_scales[-1])
+    model = _build_flow_model(
+        (finest_h, finest_w), device,
+        int_steps=int_steps, int_downsize=int_downsize,
+        nb_unet_features=nb_unet_features,
+    )
+
+    if image_loss == 'ncc':
+        image_loss_fn = NCC().loss
+    elif image_loss == 'mse':
+        image_loss_fn = MSE().loss
+    else:
+        raise ValueError(f'Unsupported image_loss: {image_loss}')
+
+    grad_loss_fn = Grad('l2', loss_mult=int_downsize).loss
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler, schedule_type = _create_lr_scheduler(
+        optimizer, lr_schedule, max_epochs, lr_gamma=lr_gamma, lr_min=lr_min
+    )
+
+    best_loss = float('inf')
+    best_flow = None
+    best_state = None
+    stale_epochs = 0
+    log_every = max(max_epochs // 15, 1)
+
+    for epoch in range(max_epochs):
+        model.train()
+        loss, _ = _unrolled_pyramid_forward(
+            model, fixed_original, moving_original, device, scales,
+            int_downsize, image_loss_fn, grad_loss_fn, lamda, registration=False,
+        )
+        current_loss = loss.item()
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        if schedule_type == 'plateau':
+            scheduler.step(current_loss)
+        elif scheduler is not None:
+            scheduler.step()
+
+        improved = current_loss < best_loss - min_delta
+        if improved:
+            best_loss = current_loss
+            stale_epochs = 0
+            model.eval()
+            with torch.no_grad():
+                best_flow = _unrolled_pyramid_forward(
+                    model, fixed_original, moving_original, device, scales,
+                    int_downsize, image_loss_fn, grad_loss_fn, lamda, registration=True,
+                )
+                best_state = copy.deepcopy(model.state_dict())
+            model.train()
+        else:
+            stale_epochs += 1
+
+        if epoch % log_every == 0 or epoch == max_epochs - 1:
+            cur_lr = optimizer.param_groups[0]['lr']
+            print(
+                f'  epoch {epoch + 1}/{max_epochs}: loss={current_loss:.4f} '
+                f'best={best_loss:.4f} lr={cur_lr:.2e}'
+            )
+
+        if early_stop and stale_epochs >= patience:
+            print(
+                f'  early stop at epoch {epoch + 1} '
+                f'(patience={patience}, best_loss={best_loss:.4f})'
+            )
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        flow_full = best_flow
+    else:
+        model.eval()
+        with torch.no_grad():
+            flow_full = _unrolled_pyramid_forward(
+                model, fixed_original, moving_original, device, scales,
+                int_downsize, image_loss_fn, grad_loss_fn, lamda, registration=True,
+            )
+
+    warped = _apply_flow_to_image(moving_original, flow_full, device)
+    if save_model_path:
+        model.save(save_model_path)
+    return warped, flow_full
+
+
 def _flow_tensor_to_numpy(flow) -> np.ndarray:
     return flow.squeeze().detach().cpu().numpy().astype(np.float32)
 
@@ -311,6 +533,7 @@ def register_pifreg(
     affine_init=True,
     histogram_match=True,
     multiscale=True,
+    multiscale_mode='sequential',
     scales=(0.25, 0.5, 1.0),
     early_stop=True,
     patience=100,
@@ -343,6 +566,8 @@ def register_pifreg(
         lr_gamma: StepLR / Plateau 的衰减因子
         lr_min: 学习率下限
         affine_init / histogram_match / multiscale / scales: 预处理与金字塔配置
+        multiscale_mode: 多尺度策略 'sequential'（每层独立训练，默认）|
+                         'unrolled'（同一网络，每 epoch 内 128→256→512 再 backward）
 
     返回:
         warped_image: 配准后的移动图像（原分辨率，仅一次 warp）
@@ -382,7 +607,17 @@ def register_pifreg(
     )
 
     if multiscale and model_path is None:
-        warped, flow_full = _register_multiscale(
+        mode = (multiscale_mode or 'sequential').lower()
+        if mode == 'unrolled':
+            register_fn = _register_multiscale_unrolled
+        elif mode == 'sequential':
+            register_fn = _register_multiscale
+        else:
+            raise ValueError(
+                f"Unsupported multiscale_mode: {multiscale_mode!r} "
+                "(expected 'sequential' or 'unrolled')"
+            )
+        warped, flow_full = register_fn(
             fixed_original, moving_original, device, epochs, lr, lamda,
             int_steps, int_downsize, image_loss, scales, save_model_path=save_model_path,
             nb_unet_features=nb_unet_features,
