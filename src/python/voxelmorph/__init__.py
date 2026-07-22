@@ -5,7 +5,14 @@ from .layers import ResizeTransform, SpatialTransformer, VecInt
 from .losses import Dice, Grad, MSE, NCC
 from .modelio import LoadableModel, store_config_args
 from .networks import ConvBlock, Unet, VxmDense
-from .training import build_adjacent_band_pairs, discover_band_folders, train_voxelmorph
+from .training import (
+    build_adjacent_band_pairs,
+    discover_band_folders,
+    evaluate_voxelmorph_pairs,
+    save_split_manifest,
+    split_folders_train_test,
+    train_voxelmorph,
+)
 
 __all__ = [
     'default_unet_features',
@@ -24,5 +31,8 @@ __all__ = [
     'VxmDense',
     'build_adjacent_band_pairs',
     'discover_band_folders',
+    'evaluate_voxelmorph_pairs',
+    'save_split_manifest',
+    'split_folders_train_test',
     'train_voxelmorph',
 ]

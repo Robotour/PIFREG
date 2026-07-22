@@ -55,4 +55,4 @@ class LoadableModel(nn.Module):
         checkpoint = torch.load(path, map_location=torch.device(device))
         model = cls(**checkpoint['config'])
         model.load_state_dict(checkpoint['model_state'], strict=False)
-        return model
+        return model.to(device)
