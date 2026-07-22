@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-VoxelMorph 无监督预训练 + 7:3 session 划分 + 测试集评估
+VoxelMorph HSI 实验入口：独立 run 目录 + best.pt + 全测试集评估与可视化
 
-默认数据: data/cut_images_all （每个子文件夹 = 一次拍摄 / 30 波段）
+方法 (--method):
+  baseline       — 随机相邻波段对（原版 VoxelMorph 预训练）
+  stack_spatial  — session 子链 + 空间加权（你的改进方法）
 
-示例:
-    python src/python/experiments/train_voxelmorph.py \\
-        --data-dir data/cut_images_all \\
-        --train-ratio 0.7 \\
-        --epochs 300 \\
-        --model-dir models/voxelmorph_cut_images_all
+每次实验输出到:
+  outputs/voxelmorph_runs/{method}/{exp_name}_{timestamp}/
+
+Linux 示例见 .cursor/skills/voxelmorph-hsi-training/SKILL.md
 """
 
 from __future__ import annotations
@@ -17,158 +17,98 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.python.voxelmorph.training import (
-    build_adjacent_band_pairs,
-    discover_band_folders,
-    evaluate_voxelmorph_pairs,
-    save_split_manifest,
-    split_folders_train_test,
-    train_voxelmorph,
-)
+from src.python.voxelmorph.experiment import run_full_experiment
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Unsupervised VoxelMorph pre-training on HSI adjacent-band pairs',
+    p = argparse.ArgumentParser(description='VoxelMorph HSI train/eval/visualize experiment')
+    p.add_argument(
+        '--method',
+        choices=['baseline', 'stack_spatial'],
+        required=True,
+        help='baseline=pairwise; stack_spatial=your proposed method',
     )
-    parser.add_argument(
-        '--data-dir',
-        default='data/cut_images_all',
-        help='Root folder containing one subfolder per HSI session',
-    )
-    parser.add_argument('--train-ratio', type=float, default=0.7)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--image-size', type=int, nargs=2, default=[256, 256], metavar=('W', 'H'))
-    parser.add_argument('--model-dir', default='models/voxelmorph_cut_images_all')
-    parser.add_argument('--epochs', type=int, default=300)
-    parser.add_argument('--steps-per-epoch', type=int, default=80)
-    parser.add_argument('--val-steps', type=int, default=100, help='Random val pairs per validation')
-    parser.add_argument('--val-interval', type=int, default=20)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--lambda', dest='lamda', type=float, default=0.01)
-    parser.add_argument('--int-steps', type=int, default=7)
-    parser.add_argument('--int-downsize', type=int, default=2)
-    parser.add_argument('--image-loss', choices=['ncc', 'mse'], default='ncc')
-    parser.add_argument('--load-model', default=None, help='Optional checkpoint to resume from')
-    parser.add_argument('--device', default='cuda')
-    parser.add_argument('--eval-only', action='store_true', help='Skip training, only evaluate checkpoint')
-    parser.add_argument('--checkpoint', default=None, help='Checkpoint for --eval-only')
-    return parser.parse_args()
+    p.add_argument('--exp-name', default='run', help='Experiment label in run folder name')
+    p.add_argument('--data-dir', default='data/cut_images_all')
+    p.add_argument('--train-ratio', type=float, default=0.7)
+    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--image-size', type=int, nargs=2, default=[256, 256], metavar=('W', 'H'))
+    p.add_argument('--epochs', type=int, default=300)
+    p.add_argument('--steps-per-epoch', type=int, default=80)
+    p.add_argument('--val-steps', type=int, default=100, help='Baseline: random val pairs')
+    p.add_argument('--val-session-steps', type=int, default=15, help='Stack: val sessions per epoch')
+    p.add_argument('--val-interval', type=int, default=20)
+    p.add_argument('--lr', type=float, default=1e-4)
+    p.add_argument('--lambda', dest='lamda', type=float, default=0.01)
+    p.add_argument('--int-steps', type=int, default=7)
+    p.add_argument('--int-downsize', type=int, default=2)
+    p.add_argument('--image-loss', choices=['ncc', 'mse'], default=None,
+                   help='Default: ncc for baseline, mse for stack_spatial')
+    p.add_argument('--subchain-len', type=int, default=6)
+    p.add_argument('--center-floor', type=float, default=0.35)
+    p.add_argument('--edge-gain', type=float, default=1.0)
+    p.add_argument('--ascending-chain', action='store_true')
+    p.add_argument('--smooth-flow-sigma', type=float, default=1.5)
+    p.add_argument('--load-model', default=None)
+    p.add_argument('--device', default='cuda')
+    p.add_argument('--eval-only', action='store_true')
+    p.add_argument('--run-dir', default=None, help='Existing run dir for --eval-only')
+    return p.parse_args()
 
 
 def main():
     args = parse_args()
-    data_root = PROJECT_ROOT / args.data_dir
-    image_size = tuple(args.image_size)
-    model_dir = PROJECT_ROOT / args.model_dir
-    model_dir.mkdir(parents=True, exist_ok=True)
+    image_loss = args.image_loss
+    if image_loss is None:
+        image_loss = 'ncc' if args.method == 'baseline' else 'mse'
 
-    folders = discover_band_folders([data_root])
-    train_folders, test_folders = split_folders_train_test(
-        folders, train_ratio=args.train_ratio, seed=args.seed,
-    )
-
-    split_path = save_split_manifest(
-        model_dir / 'split_manifest.json',
-        train_folders,
-        test_folders,
-        args.train_ratio,
-        args.seed,
-    )
-
-    train_pairs = build_adjacent_band_pairs(train_folders, image_size=image_size)
-    test_pairs = build_adjacent_band_pairs(test_folders, image_size=image_size)
-    inshape = train_pairs[0][0].shape
-
-    config = {
-        'created_at': datetime.now().isoformat(timespec='seconds'),
-        'data_dir': str(data_root),
-        'train_ratio': args.train_ratio,
-        'seed': args.seed,
-        'image_size': list(image_size),
-        'num_sessions': len(folders),
-        'num_train_sessions': len(train_folders),
-        'num_test_sessions': len(test_folders),
-        'num_train_pairs': len(train_pairs),
-        'num_test_pairs': len(test_pairs),
+    train_kwargs = {
         'epochs': args.epochs,
         'steps_per_epoch': args.steps_per_epoch,
-        'image_loss': args.image_loss,
+        'val_steps': args.val_steps,
+        'val_session_steps': args.val_session_steps,
+        'val_interval': args.val_interval,
+        'lr': args.lr,
         'lamda': args.lamda,
-        'inshape': list(inshape),
+        'int_steps': args.int_steps,
+        'int_downsize': args.int_downsize,
+        'image_loss': image_loss,
+        'subchain_len': args.subchain_len,
+        'center_floor': args.center_floor,
+        'edge_gain': args.edge_gain,
+        'chain_descending': not args.ascending_chain,
+        'load_model': args.load_model,
+        'device': args.device,
     }
-    with open(model_dir / 'config.json', 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
 
-    print('=' * 60)
-    print('VoxelMorph unsupervised training')
-    print(f'Data root: {data_root}')
-    print(f'Sessions: {len(folders)}  train={len(train_folders)}  test={len(test_folders)}')
-    print(f'Pairs: train={len(train_pairs)}  test={len(test_pairs)}')
-    print(f'Split manifest: {split_path}')
-    print(f'Model dir: {model_dir}')
-    print('=' * 60)
-
-    if args.eval_only:
-        ckpt = args.checkpoint or str(model_dir / 'final.pt')
-        from src.python.voxelmorph.networks import VxmDense
-
-        model = VxmDense.load(ckpt, args.device)
-        final_path = ckpt
-    else:
-        _, final_path = train_voxelmorph(
-            train_pairs,
-            model_dir=model_dir,
-            inshape=inshape,
-            device=args.device,
-            epochs=args.epochs,
-            steps_per_epoch=args.steps_per_epoch,
-            lr=args.lr,
-            image_loss=args.image_loss,
-            lamda=args.lamda,
-            int_steps=args.int_steps,
-            int_downsize=args.int_downsize,
-            load_model=args.load_model,
-            val_pairs=test_pairs,
-            val_steps=args.val_steps,
-            val_interval=args.val_interval,
-        )
-        from src.python.voxelmorph.networks import VxmDense
-
-        model = VxmDense.load(final_path, args.device)
-
-    print('\nEvaluating on held-out test pairs (all)...')
-    test_result = evaluate_voxelmorph_pairs(
-        model, test_pairs, device=args.device, max_pairs=None, verbose=True,
+    run_dir, summary = run_full_experiment(
+        project_root=PROJECT_ROOT,
+        method=args.method,
+        exp_name=args.exp_name,
+        data_dir=args.data_dir,
+        train_ratio=args.train_ratio,
+        seed=args.seed,
+        image_size=tuple(args.image_size),
+        train_kwargs=train_kwargs,
+        chain_descending=not args.ascending_chain,
+        smooth_flow_sigma=args.smooth_flow_sigma,
+        skip_train=args.eval_only,
+        run_dir=Path(args.run_dir) if args.run_dir else None,
     )
-    summary = test_result['summary']
 
-    print('\nTest set summary (mean over all test pairs):')
-    for key in sorted(summary):
-        print(f'  {key}: {summary[key]:.6f}')
-
-    eval_path = model_dir / 'test_metrics.json'
-    with open(eval_path, 'w', encoding='utf-8') as f:
-        json.dump(
-            {
-                'checkpoint': final_path,
-                'num_test_pairs': test_result['num_pairs'],
-                'summary': summary,
-            },
-            f,
-            indent=2,
-        )
-
-    print(f'\nTraining/eval complete.')
-    print(f'  checkpoint: {final_path}')
-    print(f'  test metrics: {eval_path}')
+    print('\n' + '=' * 60)
+    print('Experiment complete')
+    print(f'  run_dir         : {run_dir}')
+    print(f'  best checkpoint : {summary["best_checkpoint"]}')
+    print(f'  visualizations  : {run_dir / "visualizations"}')
+    print(f'  test_metrics    : {run_dir / "test_metrics.json"}')
+    print('=' * 60)
 
 
 if __name__ == '__main__':

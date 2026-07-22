@@ -74,36 +74,57 @@ def _session_slug(folder: Path) -> str:
 
 
 def visualize_test_sessions(
-    model_dir=DEFAULT_MODEL_DIR,
+    model_dir=None,
+    run_dir=None,
     output_dir=None,
     checkpoint=None,
     image_size=(256, 256),
     device="cuda",
     num_sessions=6,
     session_indices=None,
+    all_test_sessions=False,
+    test_folders=None,
     spectral_path=None,
     descending=True,
     metric="NCC_after",
+    smooth_flow_sigma=1.5,
 ):
-    model_dir = Path(model_dir)
-    output_dir = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
+    run_dir = Path(run_dir) if run_dir else None
+    model_dir = Path(model_dir) if model_dir else (run_dir or DEFAULT_MODEL_DIR)
+    if run_dir is not None:
+        model_dir = run_dir
+    output_dir = Path(output_dir) if output_dir else (
+        (run_dir / "visualizations") if run_dir else DEFAULT_OUTPUT_DIR
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     spectral_path = Path(spectral_path or DEFAULT_SPECTRAL_PATH)
     device = torch.device(device if torch.cuda.is_available() else "cpu")
 
     if checkpoint:
+        ckpt_path = str(Path(checkpoint).resolve())
         best_info = {
             "epoch": None,
             "metric": metric,
             "metric_value": None,
-            "checkpoint": str(Path(checkpoint).resolve()),
+            "checkpoint": ckpt_path,
             "val": None,
             "note": "user-specified checkpoint",
         }
     else:
-        best_info = select_best_checkpoint(model_dir, metric=metric)
-
-    ckpt_path = best_info["checkpoint"]
+        default_ckpt = model_dir / "checkpoints" / "best.pt"
+        if default_ckpt.is_file():
+            ckpt_path = str(default_ckpt.resolve())
+            best_info = {
+                "epoch": None,
+                "metric": metric,
+                "metric_value": None,
+                "checkpoint": ckpt_path,
+                "val": None,
+                "note": "checkpoints/best.pt",
+            }
+        else:
+            best_info = select_best_checkpoint(model_dir, metric=metric)
+            ckpt_path = best_info["checkpoint"]
     print("=" * 60)
     print("VoxelMorph test-set fake-RGB visualization")
     print(f"Model dir : {model_dir}")
@@ -126,9 +147,12 @@ def visualize_test_sessions(
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
         image_size = tuple(cfg.get("image_size", [256, 256]))
 
-    test_folders = _load_test_folders(model_dir)
+    if test_folders is None:
+        test_folders = _load_test_folders(model_dir)
     if session_indices:
         chosen = [test_folders[i] for i in session_indices if 0 <= i < len(test_folders)]
+    elif all_test_sessions:
+        chosen = list(test_folders)
     else:
         chosen = test_folders[: max(1, int(num_sessions))]
 
@@ -145,6 +169,7 @@ def visualize_test_sessions(
         bands_norm, bands_raw, band_files, wavelengths = _load_stack(folder, image_size)
         bands_norm_after, chain_steps = register_stack_with_voxelmorph_chain(
             model, bands_norm, device=device, descending=descending,
+            smooth_flow_sigma=smooth_flow_sigma,
         )
         bands_raw_after = register_raw_stack_with_chain_flows(
             bands_raw, chain_steps, device=device,
@@ -220,12 +245,14 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Visualize VoxelMorph best-checkpoint registration on test sessions (fake RGB)",
     )
-    p.add_argument("--model-dir", type=str, default=str(DEFAULT_MODEL_DIR))
+    p.add_argument("--run-dir", type=str, default=None, help="Experiment run dir (uses checkpoints/best.pt)")
+    p.add_argument("--model-dir", type=str, default=None)
     p.add_argument("--output-dir", type=str, default=None)
-    p.add_argument("--checkpoint", type=str, default=None, help="Override auto-selected best ckpt")
+    p.add_argument("--checkpoint", type=str, default=None, help="Override; default checkpoints/best.pt")
     p.add_argument("--image-size", type=int, nargs=2, default=[256, 256], metavar=("W", "H"))
     p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--num-sessions", type=int, default=6, help="How many test sessions to visualize")
+    p.add_argument("--num-sessions", type=int, default=6, help="How many test sessions (ignored if --all-test-sessions)")
+    p.add_argument("--all-test-sessions", action="store_true", help="Visualize every test session")
     p.add_argument(
         "--session-indices",
         type=str,
@@ -235,6 +262,12 @@ def parse_args():
     p.add_argument("--spectral-path", type=str, default=str(DEFAULT_SPECTRAL_PATH))
     p.add_argument("--ascending", action="store_true", help="Chain toward short wavelength (default: descending)")
     p.add_argument("--metric", type=str, default="NCC_after", help="Val metric for best checkpoint")
+    p.add_argument(
+        "--smooth-flow-sigma",
+        type=float,
+        default=1.5,
+        help="Gaussian smooth on chain flows to reduce spikes (0=off)",
+    )
     return p.parse_args()
 
 
@@ -244,6 +277,7 @@ def main():
     if args.session_indices:
         indices = [int(x) for x in args.session_indices.split(",") if x.strip() != ""]
     visualize_test_sessions(
+        run_dir=args.run_dir,
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         checkpoint=args.checkpoint,
@@ -251,9 +285,11 @@ def main():
         device=args.device,
         num_sessions=args.num_sessions,
         session_indices=indices,
+        all_test_sessions=args.all_test_sessions,
         spectral_path=args.spectral_path,
         descending=not args.ascending,
         metric=args.metric,
+        smooth_flow_sigma=args.smooth_flow_sigma,
     )
 
 

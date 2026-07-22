@@ -66,6 +66,49 @@ class MSE:
         return torch.mean((y_true - y_pred) ** 2)
 
 
+def weighted_mse_loss(y_true, y_pred, weight):
+    """Spatially weighted MSE; weight shape (B,1,H,W) or broadcastable."""
+    diff2 = (y_true - y_pred) ** 2
+    return torch.mean(diff2 * weight)
+
+
+def weighted_ncc_loss(y_true, y_pred, weight, win=None):
+    """
+    Approximate spatially weighted NCC: per-pixel local NCC map weighted mean.
+    Falls back to global NCC if weight is uniform.
+    """
+    ncc = NCC(win=win)
+    ndims = len(list(y_true.size())) - 2
+    win = [9] * ndims if win is None else win
+    sum_filt = torch.ones([1, 1, *win], device=y_true.device)
+
+    pad_no = math.floor(win[0] / 2)
+    if ndims == 2:
+        stride = (1, 1)
+        padding = (pad_no, pad_no)
+    else:
+        stride = (1, 1, 1)
+        padding = (pad_no, pad_no, pad_no)
+
+    conv_fn = getattr(F, 'conv%dd' % ndims)
+    Ii, Ji = y_true, y_pred
+    I2, J2, IJ = Ii * Ii, Ji * Ji, Ii * Ji
+    I_sum = conv_fn(Ii, sum_filt, stride=stride, padding=padding)
+    J_sum = conv_fn(Ji, sum_filt, stride=stride, padding=padding)
+    I2_sum = conv_fn(I2, sum_filt, stride=stride, padding=padding)
+    J2_sum = conv_fn(J2, sum_filt, stride=stride, padding=padding)
+    IJ_sum = conv_fn(IJ, sum_filt, stride=stride, padding=padding)
+
+    win_size = np.prod(win)
+    u_I = I_sum / win_size
+    u_J = J_sum / win_size
+    cross = IJ_sum - u_J * I_sum - u_I * J_sum + u_I * u_J * win_size
+    I_var = I2_sum - 2 * u_I * I_sum + u_I * u_I * win_size
+    J_var = J2_sum - 2 * u_J * J_sum + u_J * u_J * win_size
+    cc = cross * cross / (I_var * J_var + 1e-5)
+    return -torch.mean(cc * weight)
+
+
 class Dice:
     """N-D dice for segmentation."""
 
