@@ -19,12 +19,32 @@ def _normalize_band(img):
 
 
 def load_band_image(path, image_size=None):
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError(f'Failed to read image (empty/missing): {path}')
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise ValueError(f'Failed to read image: {path}')
     if image_size is not None:
         img = cv2.resize(img, image_size)
     return _normalize_band(img)
+
+
+def _list_readable_band_files(folder):
+    """List non-empty jpeg/jpg bands that OpenCV can read, sorted by wavelength."""
+    candidates = sorted(
+        list(folder.glob('*.jpeg')) + list(folder.glob('*.jpg')),
+        key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem,
+    )
+    readable = []
+    for path in candidates:
+        if path.stat().st_size <= 0:
+            continue
+        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            continue
+        readable.append(path)
+    return readable
 
 
 def discover_band_folders(data_roots, min_bands=2):
@@ -36,11 +56,12 @@ def discover_band_folders(data_roots, min_bands=2):
             continue
         for pattern in ('**/*.jpeg', '**/*.jpg'):
             for path in root.glob(pattern):
-                folders.add(path.parent)
+                if path.stat().st_size > 0:
+                    folders.add(path.parent)
 
     valid = []
     for folder in sorted(folders):
-        files = list(folder.glob('*.jpeg')) + list(folder.glob('*.jpg'))
+        files = _list_readable_band_files(folder)
         if len(files) >= min_bands:
             valid.append(folder)
     return valid
@@ -64,10 +85,11 @@ def split_folders_train_test(folders, train_ratio=0.7, seed=42):
 def build_adjacent_band_pairs(folders, image_size=None):
     """Build (moving, fixed) pairs from adjacent bands in each folder."""
     pairs = []
+    skipped_empty = 0
     for folder in folders:
-        files = sorted(
-            list(folder.glob('*.jpeg')) + list(folder.glob('*.jpg')),
-            key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem,
+        files = _list_readable_band_files(folder)
+        skipped_empty += (
+            len(list(folder.glob('*.jpeg')) + list(folder.glob('*.jpg'))) - len(files)
         )
         if len(files) < 2:
             continue
@@ -77,6 +99,8 @@ def build_adjacent_band_pairs(folders, image_size=None):
             fixed = load_band_image(files[i + 1], image_size=image_size)
             pairs.append((moving, fixed, str(files[i]), str(files[i + 1])))
 
+    if skipped_empty:
+        print(f'Skipped {skipped_empty} empty/unreadable band images.')
     if not pairs:
         raise ValueError('No adjacent band pairs found in provided folders.')
     return pairs
@@ -181,6 +205,154 @@ def _summarize_metric_rows(rows):
         if b in summary and a in summary:
             summary[f'{metric}_delta'] = summary[a] - summary[b]
     return summary
+
+
+def select_best_checkpoint(model_dir, metric='NCC_after', history_name='train_history.json'):
+    """
+    按验证集指标选最佳 epoch，并映射到已保存的 .pt（保存间隔可能导致 epoch 不完全对齐）。
+
+    Returns:
+        dict: epoch, metric_value, checkpoint path, val summary
+    """
+    model_dir = Path(model_dir)
+    history_path = model_dir / history_name
+    if not history_path.is_file():
+        final_path = model_dir / 'final.pt'
+        if final_path.is_file():
+            return {
+                'epoch': None,
+                'metric': metric,
+                'metric_value': None,
+                'checkpoint': str(final_path),
+                'val': None,
+                'note': 'no train_history.json; using final.pt',
+            }
+        raise FileNotFoundError(f'No history or final.pt under {model_dir}')
+
+    history = json.loads(history_path.read_text(encoding='utf-8'))
+    best = None
+    for row in history:
+        val = row.get('val')
+        if not val or metric not in val:
+            continue
+        score = float(val[metric])
+        if best is None or score > best['metric_value']:
+            best = {
+                'epoch': int(row['epoch']),
+                'metric': metric,
+                'metric_value': score,
+                'val': val,
+            }
+    if best is None:
+        final_path = model_dir / 'final.pt'
+        if not final_path.is_file():
+            raise FileNotFoundError(f'No val entries in history and no final.pt in {model_dir}')
+        return {
+            'epoch': None,
+            'metric': metric,
+            'metric_value': None,
+            'checkpoint': str(final_path),
+            'val': None,
+            'note': 'no val metrics; using final.pt',
+        }
+
+    numbered = []
+    for path in model_dir.glob('*.pt'):
+        if path.stem.isdigit():
+            numbered.append((int(path.stem), path))
+    numbered.sort(key=lambda x: x[0])
+
+    if numbered:
+        target = best['epoch']
+        nearest_epoch, nearest_path = min(numbered, key=lambda x: abs(x[0] - target))
+        best['checkpoint'] = str(nearest_path)
+        best['checkpoint_epoch'] = nearest_epoch
+        if nearest_epoch != target:
+            best['note'] = (
+                f'best val epoch={target}, nearest saved checkpoint={nearest_path.name}'
+            )
+    else:
+        final_path = model_dir / 'final.pt'
+        best['checkpoint'] = str(final_path)
+        best['checkpoint_epoch'] = None
+        best['note'] = 'no numbered checkpoints; using final.pt'
+    return best
+
+
+def register_stack_with_voxelmorph_chain(
+    model,
+    bands,
+    device='cuda',
+    descending=True,
+):
+    """
+    用相邻波段 VoxelMorph 沿波长链配准整栈。
+
+    训练配对约定：moving=较短波长, fixed=较长波长（升序相邻）。
+    descending=True：从长波锚点向短波逐对配准（与 PIFReg chain 一致）。
+
+    Returns:
+        registered bands (list of float32 arrays), list of per-step info
+    """
+    if isinstance(device, str):
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
+
+    model.eval()
+    model = model.to(device)
+    registered = [np.asarray(b, dtype=np.float32).copy() for b in bands]
+    n = len(registered)
+    if n < 2:
+        return registered, []
+
+    steps = []
+    with torch.no_grad():
+        if descending:
+            pair_indices = [(i + 1, i) for i in range(n - 2, -1, -1)]  # fixed, moving
+        else:
+            pair_indices = [(i - 1, i) for i in range(1, n)]
+
+        for step, (fixed_idx, moving_idx) in enumerate(pair_indices, start=1):
+            moving = registered[moving_idx]
+            fixed = registered[fixed_idx]
+            moving_t = torch.from_numpy(moving).float().unsqueeze(0).unsqueeze(0).to(device)
+            fixed_t = torch.from_numpy(fixed).float().unsqueeze(0).unsqueeze(0).to(device)
+            warped_t, flow_t = model(moving_t, fixed_t, registration=True)
+            warped = warped_t.squeeze().detach().cpu().numpy().astype(np.float32)
+            registered[moving_idx] = warped
+            steps.append({
+                'step': step,
+                'fixed_idx': fixed_idx,
+                'moving_idx': moving_idx,
+                'flow': flow_t.squeeze(0).detach().cpu().numpy().astype(np.float32),
+            })
+    return registered, steps
+
+
+def warp_band_with_flow(band, flow, device='cpu'):
+    """Apply a (2,H,W) flow to a single band (any intensity range)."""
+    from .layers import SpatialTransformer
+
+    if isinstance(device, str):
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    band = np.asarray(band, dtype=np.float32)
+    h, w = band.shape
+    transformer = SpatialTransformer((h, w)).to(device)
+    src = torch.from_numpy(band).float().unsqueeze(0).unsqueeze(0).to(device)
+    flow_t = torch.from_numpy(np.asarray(flow, dtype=np.float32)).unsqueeze(0).to(device)
+    with torch.no_grad():
+        out = transformer(src, flow_t)
+    return out.squeeze().detach().cpu().numpy().astype(np.float32)
+
+
+def register_raw_stack_with_chain_flows(bands_raw, chain_steps, device='cpu'):
+    """Apply chain flows (from register_stack_with_voxelmorph_chain) to raw-intensity bands."""
+    registered = [np.asarray(b, dtype=np.float32).copy() for b in bands_raw]
+    for step in chain_steps:
+        moving_idx = step['moving_idx']
+        registered[moving_idx] = warp_band_with_flow(
+            registered[moving_idx], step['flow'], device=device,
+        )
+    return registered
 
 
 def train_voxelmorph(
