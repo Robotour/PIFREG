@@ -64,6 +64,8 @@ def parse_args():
     p.add_argument('--smooth-flow-sigma', type=float, default=1.5)
     p.add_argument('--load-model', default=None)
     p.add_argument('--device', default='cuda')
+    p.add_argument('--grad-clip', type=float, default=1.0,
+                   help='Gradient norm clip (0=off); helps prevent loss explosion')
     p.add_argument('--eval-only', action='store_true')
     p.add_argument('--run-dir', default=None, help='Existing run dir for --eval-only')
     p.add_argument('--metrics-csv', default=None, help='Comparison CSV; default outputs/metrics_tables/seed_{seed}.csv')
@@ -95,6 +97,8 @@ def main():
         'chain_descending': not args.ascending_chain,
         'load_model': args.load_model,
         'device': args.device,
+        'seed': args.seed,
+        'grad_clip': args.grad_clip,
     }
 
     metrics_csv = None
@@ -127,6 +131,7 @@ def main():
     print('Experiment complete')
     print(f'  run_dir              : {run_dir}')
     print(f'  best checkpoint      : {summary["best_checkpoint"]}')
+    print(f'  last checkpoint      : {run_dir / "checkpoints" / "last.pt"}')
     print(f'  visualizations       : {run_dir / "visualizations"}')
     print(f'    (bands/flows/RGB)  : {run_dir / "visualizations" / "01_*"}')
     print(f'  test_metrics         : {run_dir / "test_metrics.json"}')

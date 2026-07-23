@@ -67,6 +67,12 @@ def prepare_data_split(
         train_ratio,
         seed,
     )
+    manifest_path = run_dir / 'split_manifest.json'
+    print(
+        f'Train/test split fixed ({len(train_folders)} train / {len(test_folders)} test sessions): '
+        f'{manifest_path}',
+        flush=True,
+    )
     train_pairs = build_adjacent_band_pairs(
         train_folders, image_size=image_size, canvas_shape=canvas_shape,
     )
@@ -105,6 +111,8 @@ def train_method(
         int_steps=train_kwargs.get('int_steps', 7),
         int_downsize=train_kwargs.get('int_downsize', 2),
         val_interval=train_kwargs.get('val_interval', 20),
+        seed=train_kwargs.get('seed', 42),
+        grad_clip=train_kwargs.get('grad_clip', 1.0),
     )
 
     if method == 'baseline':

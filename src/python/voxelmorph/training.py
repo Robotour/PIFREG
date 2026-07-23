@@ -112,8 +112,18 @@ def split_folders_train_test(folders, train_ratio=0.7, seed=42):
     return train_folders, test_folders
 
 
+def _pair_content_shape(path, image_size=None):
+    """Native (H, W) before canvas padding."""
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError(f'Failed to read image: {path}')
+    if image_size is not None:
+        return image_size[1], image_size[0]
+    return img.shape[:2]
+
+
 def build_adjacent_band_pairs(folders, image_size=None, canvas_shape=None):
-    """Build (moving, fixed) pairs from adjacent bands in each folder."""
+    """Build (moving, fixed, paths..., content_h, content_w) pairs per folder."""
     pairs = []
     skipped_empty = 0
     for folder in folders:
@@ -125,13 +135,16 @@ def build_adjacent_band_pairs(folders, image_size=None, canvas_shape=None):
             continue
 
         for i in range(len(files) - 1):
+            content_h, content_w = _pair_content_shape(files[i], image_size=image_size)
             moving = load_band_image(
                 files[i], image_size=image_size, canvas_shape=canvas_shape,
             )
             fixed = load_band_image(
                 files[i + 1], image_size=image_size, canvas_shape=canvas_shape,
             )
-            pairs.append((moving, fixed, str(files[i]), str(files[i + 1])))
+            pairs.append((
+                moving, fixed, str(files[i]), str(files[i + 1]), content_h, content_w,
+            ))
 
     if skipped_empty:
         print(f'Skipped {skipped_empty} empty/unreadable band images.')
@@ -157,19 +170,25 @@ def save_split_manifest(path, train_folders, test_folders, train_ratio, seed):
 
 
 def scan_to_scan_generator(pairs, batch_size=1):
-    """Yield random adjacent-band (moving, fixed) batches."""
+    """Yield random adjacent-band (moving, fixed) batches and native content size."""
     while True:
         indices = np.random.randint(len(pairs), size=batch_size)
         moving_batch = []
         fixed_batch = []
+        content = None
         for idx in indices:
-            moving, fixed, _, _ = pairs[idx]
+            moving, fixed, _, _, content_h, content_w = pairs[idx]
             moving_batch.append(moving)
             fixed_batch.append(fixed)
+            content = (int(content_h), int(content_w))
 
         moving_arr = np.stack(moving_batch, axis=0)[:, np.newaxis, ...]
         fixed_arr = np.stack(fixed_batch, axis=0)[:, np.newaxis, ...]
-        yield moving_arr, fixed_arr
+        yield moving_arr, fixed_arr, content
+
+
+def _crop_tensor_spatial(t, h, w):
+    return t[..., :h, :w]
 
 
 def _pair_metrics(fixed, moving, warped):
@@ -194,15 +213,18 @@ def evaluate_voxelmorph_pairs(
     pairs,
     device='cuda',
     max_pairs=None,
+    val_indices=None,
     verbose=True,
 ):
-    """Run inference on band pairs and aggregate before/after metrics."""
+    """Run inference on band pairs and aggregate before/after metrics (content region only)."""
     if isinstance(device, str):
         device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
     model.eval()
     model = model.to(device)
-    if max_pairs is not None and max_pairs < len(pairs):
+    if val_indices is not None:
+        eval_pairs = [pairs[int(i)] for i in val_indices]
+    elif max_pairs is not None and max_pairs < len(pairs):
         indices = np.random.default_rng(0).choice(len(pairs), size=max_pairs, replace=False)
         eval_pairs = [pairs[i] for i in indices]
     else:
@@ -210,14 +232,20 @@ def evaluate_voxelmorph_pairs(
 
     rows = []
     with torch.no_grad():
-        for idx, (moving, fixed, moving_path, fixed_path) in enumerate(eval_pairs):
+        for idx, pair in enumerate(eval_pairs):
+            moving, fixed, moving_path, fixed_path, content_h, content_w = pair
+            ch, cw = int(content_h), int(content_w)
             moving_t = torch.from_numpy(moving).float().unsqueeze(0).unsqueeze(0).to(device)
             fixed_t = torch.from_numpy(fixed).float().unsqueeze(0).unsqueeze(0).to(device)
             warped_t, _ = model(moving_t, fixed_t, registration=True)
             warped = warped_t.squeeze().detach().cpu().numpy().astype(np.float32)
-            row = _pair_metrics(fixed, moving, warped)
+            row = _pair_metrics(
+                fixed[:ch, :cw], moving[:ch, :cw], warped[:ch, :cw],
+            )
             row['moving_path'] = moving_path
             row['fixed_path'] = fixed_path
+            row['content_h'] = ch
+            row['content_w'] = cw
             rows.append(row)
             if verbose and (idx + 1) % max(len(eval_pairs) // 10, 1) == 0:
                 print(f'  evaluated {idx + 1}/{len(eval_pairs)} pairs', flush=True)
@@ -506,22 +534,23 @@ def stack_subchain_generator(folders, subchain_len=6, image_size=None, canvas_sh
     """
     Yield contiguous sub-chains from random sessions for stack-aware training.
 
-    Each sample: list of normalized bands length K (K=subchain_len), padded to canvas_shape.
+    Each sample: (bands list, content_h, content_w).
     """
     folders = list(folders)
     while True:
         folder = folders[np.random.randint(len(folders))]
-        bands_eq, _, _ = load_session_bands(folder, image_size=image_size)
+        bands_eq, _, band_paths = load_session_bands(folder, image_size=image_size)
         if canvas_shape is not None:
             ch, cw = canvas_shape
             bands_eq = [pad_bottom_right(b, ch, cw) for b in bands_eq]
         if len(bands_eq) < 2:
             continue
+        content_h, content_w = _pair_content_shape(band_paths[0], image_size=image_size)
         k = min(subchain_len, len(bands_eq))
         if k < 2:
             continue
         start = np.random.randint(0, len(bands_eq) - k + 1)
-        yield bands_eq[start : start + k]
+        yield bands_eq[start : start + k], int(content_h), int(content_w)
 
 
 def _chain_pair_indices(n, descending=True):
@@ -619,12 +648,14 @@ def _train_step_stack_chain(
     image_loss_func,
     grad_loss_func,
     lamda,
+    content_hw,
     descending=True,
     spatial_weights=False,
     center_floor=0.35,
     edge_gain=1.0,
 ):
     """One stack sub-chain forward: accumulate chain losses (differentiable)."""
+    content_h, content_w = content_hw
     registered = [
         torch.from_numpy(np.asarray(b, dtype=np.float32)).float().unsqueeze(0).unsqueeze(0).to(device)
         for b in bands
@@ -635,12 +666,16 @@ def _train_step_stack_chain(
         moving = registered[moving_idx]
         fixed = registered[fixed_idx]
         warped, preint_flow = model(moving, fixed)
+        moving_c = _crop_tensor_spatial(moving, content_h, content_w)
+        fixed_c = _crop_tensor_spatial(fixed, content_h, content_w)
+        warped_c = _crop_tensor_spatial(warped, content_h, content_w)
+        flow_c = _crop_tensor_spatial(preint_flow, content_h, content_w)
         weight_t = (
-            _weight_tensor_from_fixed(fixed, center_floor, edge_gain, device)
+            _weight_tensor_from_fixed(fixed_c, center_floor, edge_gain, device)
             if spatial_weights else None
         )
-        sim = _apply_similarity_loss(fixed, warped, image_loss, image_loss_func, weight_t)
-        total_loss = total_loss + sim + lamda * grad_loss_func(None, preint_flow)
+        sim = _apply_similarity_loss(fixed_c, warped_c, image_loss, image_loss_func, weight_t)
+        total_loss = total_loss + sim + lamda * grad_loss_func(None, flow_c)
         registered[moving_idx] = warped
     return total_loss / max(len(pair_indices), 1)
 
@@ -679,9 +714,11 @@ def _train_voxelmorph_core(
     chain_descending=True,
     val_session_steps=10,
     method='baseline',
+    seed=42,
+    grad_clip=1.0,
 ):
     """
-    Internal trainer. Saves checkpoints/best.pt (best val) and checkpoints/final.pt.
+    Internal trainer. Saves checkpoints/best.pt, checkpoints/last.pt, checkpoints/final.pt.
     """
     from .config import default_unet_features
     from .losses import Grad, MSE, NCC
@@ -734,6 +771,43 @@ def _train_voxelmorph_core(
     best_score = float('-inf')
     best_epoch = None
     best_path = ckpt_dir / 'best.pt'
+    last_path = ckpt_dir / 'last.pt'
+
+    val_pair_indices = None
+    val_session_indices = None
+    if val_pairs:
+        n_val = min(val_steps, len(val_pairs))
+        val_pair_indices = np.random.default_rng(seed).choice(
+            len(val_pairs), size=n_val, replace=False,
+        ).astype(int).tolist()
+    if training_mode == 'stack' and val_folders:
+        n_sess = min(val_session_steps, len(val_folders))
+        val_session_indices = np.random.default_rng(seed).choice(
+            len(val_folders), size=n_sess, replace=False,
+        ).astype(int).tolist()
+
+    eval_manifest = {
+        'seed': seed,
+        'method': method,
+        'training_mode': training_mode,
+        'val_pair_indices': val_pair_indices,
+        'val_session_indices': val_session_indices,
+        'num_val_pairs': len(val_pair_indices) if val_pair_indices else 0,
+        'num_val_sessions': len(val_session_indices) if val_session_indices else 0,
+        'note': (
+            'Validation uses a fixed subset of test split (see split_manifest.json). '
+            'NCC_before is always unregistered; NCC_after uses the current model.'
+        ),
+    }
+    with open(model_dir / 'eval_manifest.json', 'w', encoding='utf-8') as f:
+        json.dump(eval_manifest, f, indent=2)
+    print(f'Fixed val manifest: {model_dir / "eval_manifest.json"}', flush=True)
+    if val_pair_indices:
+        print(
+            f'  val pairs: {len(val_pair_indices)} fixed indices from '
+            f'{len(val_pairs)} test adjacent pairs',
+            flush=True,
+        )
 
     for epoch in range(epochs):
         epoch_loss = []
@@ -741,7 +815,7 @@ def _train_voxelmorph_core(
             if training_mode == 'stack':
                 if stack_generator is None:
                     raise ValueError('train_folders required for stack training_mode')
-                subchain = next(stack_generator)
+                subchain, content_h, content_w = next(stack_generator)
                 loss = _train_step_stack_chain(
                     model,
                     subchain,
@@ -750,29 +824,37 @@ def _train_voxelmorph_core(
                     image_loss_func,
                     grad_loss_func,
                     lamda,
+                    (content_h, content_w),
                     descending=chain_descending,
                     spatial_weights=spatial_weights,
                     center_floor=center_floor,
                     edge_gain=edge_gain,
                 )
             else:
-                moving_np, fixed_np = next(pair_generator)
+                moving_np, fixed_np, (content_h, content_w) = next(pair_generator)
                 moving = torch.from_numpy(moving_np).to(device).float()
                 fixed = torch.from_numpy(fixed_np).to(device).float()
                 warped, preint_flow = model(moving, fixed)
+                moving_c = _crop_tensor_spatial(moving, content_h, content_w)
+                fixed_c = _crop_tensor_spatial(fixed, content_h, content_w)
+                warped_c = _crop_tensor_spatial(warped, content_h, content_w)
+                flow_c = _crop_tensor_spatial(preint_flow, content_h, content_w)
                 weight_t = (
-                    _weight_tensor_from_fixed(fixed, center_floor, edge_gain, device)
+                    _weight_tensor_from_fixed(fixed_c, center_floor, edge_gain, device)
                     if spatial_weights else None
                 )
-                sim = _apply_similarity_loss(fixed, warped, image_loss, image_loss_func, weight_t)
-                loss = sim + lamda * grad_loss_func(None, preint_flow)
+                sim = _apply_similarity_loss(fixed_c, warped_c, image_loss, image_loss_func, weight_t)
+                loss = sim + lamda * grad_loss_func(None, flow_c)
 
             optimizer.zero_grad()
             loss.backward()
+            if grad_clip and grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
             optimizer.step()
             epoch_loss.append(float(loss.item()))
 
         mean_loss = float(np.mean(epoch_loss))
+        model.save(str(last_path))
         record = {
             'epoch': epoch + 1,
             'train_loss': mean_loss,
@@ -783,13 +865,17 @@ def _train_voxelmorph_core(
 
         if (epoch + 1) % val_interval == 0 or epoch == epochs - 1:
             if training_mode == 'stack' and val_folders:
+                val_subset = (
+                    [val_folders[i] for i in val_session_indices]
+                    if val_session_indices is not None else val_folders
+                )
                 val_result = evaluate_voxelmorph_sessions(
                     model,
-                    val_folders,
+                    val_subset,
                     device=device,
                     canvas_shape=inshape,
                     descending=chain_descending,
-                    max_sessions=val_session_steps,
+                    max_sessions=None,
                     verbose=False,
                 )
                 record['val_stack'] = val_result['summary']
@@ -802,13 +888,18 @@ def _train_voxelmorph_core(
                 )
             elif val_pairs:
                 val_result = evaluate_voxelmorph_pairs(
-                    model, val_pairs, device=device, max_pairs=val_steps, verbose=False,
+                    model,
+                    val_pairs,
+                    device=device,
+                    val_indices=val_pair_indices,
+                    verbose=False,
                 )
                 record['val'] = val_result['summary']
                 did_validate = True
                 print(
                     f'Epoch {epoch + 1}/{epochs}  train_loss={mean_loss:.4e}  '
-                    f'val_NCC {record["val"]["NCC_before"]:.4f}->{record["val"]["NCC_after"]:.4f}',
+                    f'val_NCC {record["val"]["NCC_before"]:.4f}'
+                    f'->{record["val"]["NCC_after"]:.4f}',
                     flush=True,
                 )
             elif epoch % 20 == 0 or epoch == epochs - 1:
@@ -846,6 +937,7 @@ def _train_voxelmorph_core(
         'best_score': best_score,
         'metric': 'NCC_after_mean' if method == 'stack_spatial' else 'NCC_after',
         'checkpoint': str(best_path.resolve()),
+        'last_checkpoint': str(last_path.resolve()),
         'final_checkpoint': str(final_path.resolve()),
     }
     with open(model_dir / 'best_info.json', 'w', encoding='utf-8') as f:
