@@ -106,6 +106,16 @@ def compute_NTG(image1, image2):
     return ntg
 
 
+def compute_MSE(image1, image2):
+    """
+    Mean squared error between two images (lower is better).
+    """
+    image1 = image1.astype(np.float64)
+    image2 = image2.astype(np.float64)
+    diff = image1 - image2
+    return float(np.mean(diff * diff))
+
+
 def compute_SSIM(image1, image2):
     """
     计算结构相似性指标（需要skimage库）

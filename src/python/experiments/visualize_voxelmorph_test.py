@@ -78,7 +78,7 @@ def visualize_test_sessions(
     run_dir=None,
     output_dir=None,
     checkpoint=None,
-    image_size=(256, 256),
+    image_size=(512, 512),
     device="cuda",
     num_sessions=6,
     session_indices=None,
@@ -145,7 +145,7 @@ def visualize_test_sessions(
     config_path = model_dir / "config.json"
     if config_path.is_file() and image_size is None:
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        image_size = tuple(cfg.get("image_size", [256, 256]))
+        image_size = tuple(cfg.get("image_size", [512, 512]))
 
     if test_folders is None:
         test_folders = _load_test_folders(model_dir)
@@ -249,7 +249,7 @@ def parse_args():
     p.add_argument("--model-dir", type=str, default=None)
     p.add_argument("--output-dir", type=str, default=None)
     p.add_argument("--checkpoint", type=str, default=None, help="Override; default checkpoints/best.pt")
-    p.add_argument("--image-size", type=int, nargs=2, default=[256, 256], metavar=("W", "H"))
+    p.add_argument("--image-size", type=int, nargs=2, default=[512, 512], metavar=("W", "H"))
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--num-sessions", type=int, default=6, help="How many test sessions (ignored if --all-test-sessions)")
     p.add_argument("--all-test-sessions", action="store_true", help="Visualize every test session")
