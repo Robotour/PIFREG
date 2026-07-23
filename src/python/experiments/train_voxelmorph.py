@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.python.experiments.experiment_data import DEFAULT_IMAGE_SIZE
 from src.python.voxelmorph.experiment import run_full_experiment
 
 
@@ -42,9 +43,9 @@ def parse_args():
         '--image-size',
         type=int,
         nargs=2,
-        default=None,
+        default=list(DEFAULT_IMAGE_SIZE),
         metavar=('W', 'H'),
-        help='Optional resize; default: native resolution (no resize)',
+        help='Resize all bands before registration (default: 512 512)',
     )
     p.add_argument('--epochs', type=int, default=300)
     p.add_argument('--steps-per-epoch', type=int, default=80)
@@ -114,7 +115,7 @@ def main():
         data_dir=args.data_dir,
         train_ratio=args.train_ratio,
         seed=args.seed,
-        image_size=tuple(args.image_size) if args.image_size else None,
+        image_size=tuple(args.image_size),
         train_kwargs=train_kwargs,
         chain_descending=not args.ascending_chain,
         smooth_flow_sigma=args.smooth_flow_sigma,
@@ -135,7 +136,8 @@ def main():
     print(f'  visualizations       : {run_dir / "visualizations"}')
     print(f'    (bands/flows/RGB)  : {run_dir / "visualizations" / "01_*"}')
     print(f'  test_metrics         : {run_dir / "test_metrics.json"}')
-    print(f'  unregistered report  : {PROJECT_ROOT / "outputs" / "metrics_tables" / f"seed_{args.seed}_unregistered.json"}')
+    print(f'  test_eval_manifest   : {run_dir / "test_eval_manifest.json"}')
+    print(f'  unregistered (run)   : {run_dir / "test_metrics_unregistered.json"}')
     if not args.no_metrics_csv:
         csv_path = metrics_csv or default_metrics_csv_path(PROJECT_ROOT, args.seed)
         print(f'  metrics_csv          : {csv_path}')

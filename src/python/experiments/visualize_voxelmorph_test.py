@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from src.python.experiments.experiment_data import DEFAULT_IMAGE_SIZE, resolve_image_size
 from src.python.experiments.experiment_recorder import save_rgb_outputs
 from src.python.experiments.session_outputs import save_session_registration_outputs
 from src.python.preprocessing import hsi_to_rgb
@@ -125,17 +126,20 @@ def visualize_test_sessions(
     config_path = model_dir / "config.json"
     if config_path.is_file():
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        if image_size is None:
-            sz = cfg.get("image_size")
-            image_size = tuple(sz) if sz else None
+        if cfg.get("image_size"):
+            image_size = tuple(cfg["image_size"])
+        elif image_size is None:
+            image_size = DEFAULT_IMAGE_SIZE
         if canvas_shape is None and cfg.get("canvas_shape"):
             canvas_shape = tuple(cfg["canvas_shape"])
+    elif image_size is None:
+        image_size = DEFAULT_IMAGE_SIZE
 
     model = VxmDense.load(ckpt_path, device)
     model.eval()
     if canvas_shape is None:
         canvas_shape = tuple(int(x) for x in model.config["inshape"])
-    print(f"Canvas (padded): {canvas_shape[1]}x{canvas_shape[0]} (WxH)")
+    print(f"Image size: {image_size[0]}x{image_size[1]} (WxH), model canvas {canvas_shape[1]}x{canvas_shape[0]}")
 
     if test_folders is None:
         test_folders = _load_test_folders(model_dir)
@@ -259,9 +263,9 @@ def parse_args():
         "--image-size",
         type=int,
         nargs=2,
-        default=None,
+        default=list(DEFAULT_IMAGE_SIZE),
         metavar=("W", "H"),
-        help="Optional resize; default: native resolution (no resize)",
+        help="Resize all bands (default: 512 512)",
     )
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--num-sessions", type=int, default=6, help="How many test sessions (ignored if --all-test-sessions)")
@@ -294,7 +298,7 @@ def main():
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         checkpoint=args.checkpoint,
-        image_size=tuple(args.image_size) if args.image_size else None,
+        image_size=tuple(args.image_size),
         device=args.device,
         num_sessions=args.num_sessions,
         session_indices=indices,

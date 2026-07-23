@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.python.experiments.experiment_data import DEFAULT_IMAGE_SIZE
 from src.python.experiments.metrics_csv import (
     append_method_row,
     default_metrics_csv_path,
@@ -69,9 +70,9 @@ def parse_args():
         '--image-size',
         type=int,
         nargs=2,
-        default=None,
+        default=list(DEFAULT_IMAGE_SIZE),
         metavar=('W', 'H'),
-        help='Optional resize; default: native resolution (no resize)',
+        help='Resize all bands (default: 512 512)',
     )
     p.add_argument('--metrics-csv', default=None)
     p.add_argument('--init-only', action='store_true', help='Only write unregistered row (row 1)')
@@ -84,7 +85,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    image_size = tuple(args.image_size) if args.image_size else None
+    image_size = tuple(args.image_size)
     csv_path = (
         Path(args.metrics_csv)
         if args.metrics_csv

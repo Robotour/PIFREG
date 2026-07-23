@@ -43,6 +43,7 @@ import cv2
 import numpy as np
 
 from src.python.experiments.experiment_data import load_hsi_stack
+from src.python.experiments.experiment_data import DEFAULT_IMAGE_SIZE
 from src.python.experiments.experiment_recorder import save_rgb_outputs
 from src.python.experiments.metrics_csv import (
     append_method_row,
@@ -320,9 +321,9 @@ def parse_args():
         '--image-size',
         type=int,
         nargs=2,
-        default=None,
+        default=list(DEFAULT_IMAGE_SIZE),
         metavar=('W', 'H'),
-        help='Optional resize; default: native resolution (no resize)',
+        help='Resize all bands (default: 512 512)',
     )
     p.add_argument('--ascending-chain', action='store_true', help='Anchor shortest wavelength (default: longest)')
     p.add_argument('--max-sessions', type=int, default=None, help='Limit test sessions (debug)')
@@ -354,7 +355,7 @@ def main():
         data_dir, args.train_ratio, args.seed, split_from,
     )
     descending = not args.ascending_chain
-    image_size = tuple(args.image_size) if args.image_size else None
+    image_size = tuple(args.image_size)
     spectral_path = Path(args.spectral_path)
     if not spectral_path.is_file():
         spectral_path = PROJECT_ROOT / args.spectral_path

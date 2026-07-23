@@ -11,6 +11,22 @@ import numpy as np
 from src.python.preprocessing.band_preprocess import histogram_equalize_band
 from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
 
+# OpenCV resize tuple (width, height) — standard for all registration experiments
+DEFAULT_IMAGE_SIZE: Tuple[int, int] = (512, 512)
+
+
+def resolve_image_size(image_size: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
+    """Return OpenCV (W, H); default 512×512."""
+    if image_size is None:
+        return DEFAULT_IMAGE_SIZE
+    return tuple(image_size)
+
+
+def model_inshape(image_size: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
+    """VoxelMorph model inshape as (H, W)."""
+    w, h = resolve_image_size(image_size)
+    return (h, w)
+
 
 def resolve_path(path, project_root: Path, extra_bases: Optional[Sequence[Path]] = None):
     candidate = Path(path)
@@ -64,14 +80,13 @@ def load_hsi_stack(
         [wavelengths]: 可选波长 stem 列表
     """
     band_files = sort_band_files(Path(folder))
+    image_size = resolve_image_size(image_size)
     bands_prep, bands_raw, wavelengths = [], [], []
     for path in band_files:
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError(f"Failed to read image: {path}")
-        img = img.astype(np.float32)
-        if image_size is not None:
-            img = cv2.resize(img, image_size)
+        img = cv2.resize(img.astype(np.float32), image_size)
         bands_raw.append(img.copy())
         bands_prep.append(histogram_equalize_band(img))
         wavelengths.append(path.stem)
@@ -94,9 +109,9 @@ def load_pair_images(
         raise ValueError("Failed to read input images")
     fixed = fixed.astype(np.float32)
     moving = moving.astype(np.float32)
-    if image_size is not None:
-        fixed = cv2.resize(fixed, image_size)
-        moving = cv2.resize(moving, image_size)
+    image_size = resolve_image_size(image_size)
+    fixed = cv2.resize(fixed, image_size)
+    moving = cv2.resize(moving, image_size)
     fixed_raw, moving_raw = fixed.copy(), moving.copy()
     fixed = histogram_equalize_band(fixed)
     moving = histogram_equalize_band(moving)

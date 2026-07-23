@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import torch
 
+from src.python.experiments.experiment_data import DEFAULT_IMAGE_SIZE, resolve_image_size
 from src.python.preprocessing.band_preprocess import histogram_equalize_band
 from src.python.preprocessing.image_pad import (
     PadInfo,
@@ -39,8 +40,8 @@ def load_band_image(
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise ValueError(f'Failed to read image: {path}')
-    if image_size is not None:
-        img = cv2.resize(img, image_size)
+    image_size = resolve_image_size(image_size)
+    img = cv2.resize(img, image_size)
     raw = img.astype(np.float32)
     orig_h, orig_w = raw.shape[:2]
     prep = _preprocess_band(raw)
@@ -113,13 +114,9 @@ def split_folders_train_test(folders, train_ratio=0.7, seed=42):
 
 
 def _pair_content_shape(path, image_size=None):
-    """Native (H, W) before canvas padding."""
-    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise ValueError(f'Failed to read image: {path}')
-    if image_size is not None:
-        return image_size[1], image_size[0]
-    return img.shape[:2]
+    """Native (H, W) after standard resize."""
+    w, h = resolve_image_size(image_size)
+    return h, w
 
 
 def build_adjacent_band_pairs(folders, image_size=None, canvas_shape=None):
@@ -762,7 +759,7 @@ def _train_voxelmorph_core(
         stack_subchain_generator(
             train_folders,
             subchain_len=subchain_len,
-            image_size=None,
+            image_size=DEFAULT_IMAGE_SIZE,
             canvas_shape=inshape,
         )
         if train_folders else None

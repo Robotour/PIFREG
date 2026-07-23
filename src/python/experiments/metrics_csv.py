@@ -50,9 +50,9 @@ def _metrics_to_row_values(summary: Dict[str, float]) -> Dict[str, float]:
 
 
 def format_image_size_label(image_size: Optional[tuple]) -> str:
-    if image_size is None:
-        return 'native'
-    return f'{image_size[0]},{image_size[1]}'
+    from .experiment_data import DEFAULT_IMAGE_SIZE, resolve_image_size
+    w, h = resolve_image_size(image_size)
+    return f'{w},{h}'
 
 
 def save_unregistered_metrics_report(
@@ -62,9 +62,12 @@ def save_unregistered_metrics_report(
     image_size=None,
     max_sessions: Optional[int] = None,
     verbose: bool = True,
+    run_dir: Optional[Path] = None,
+    test_eval_manifest: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute and save unregistered (before registration) metrics once per seed."""
     from .session_outputs import print_metrics_summary
+    from .split_eval_manifest import fingerprint_test_sessions
 
     report_dir = project_root / 'outputs' / 'metrics_tables'
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -85,18 +88,40 @@ def save_unregistered_metrics_report(
     if verbose:
         print_metrics_summary('Summary (before)', unreg['summary_before'])
 
+    fp = (
+        test_eval_manifest['test_set_fingerprint']
+        if test_eval_manifest
+        else fingerprint_test_sessions(test_folders)
+    )
     payload = {
+        'stage': 'before',
         'seed': seed,
-        'image_size': list(image_size) if image_size else None,
+        'image_size': list(resolve_image_size(image_size)),
         'num_test_sessions': unreg['num_sessions'],
+        'test_sessions': sorted(str(Path(p).resolve()) for p in test_folders),
+        'test_set_fingerprint': fp,
         'summary_before': unreg['summary_before'],
         'per_session': unreg['per_session'],
         'metric_definition': unreg['metric_definition'],
     }
+    if test_eval_manifest is not None:
+        payload['test_eval_manifest'] = str(
+            (Path(run_dir) / 'test_eval_manifest.json') if run_dir else 'test_eval_manifest.json',
+        )
+
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(payload, f, indent=2)
     if verbose:
-        print(f'Unregistered report: {report_path}', flush=True)
+        print(f'Unregistered report (global): {report_path}', flush=True)
+
+    if run_dir is not None:
+        run_dir = Path(run_dir)
+        run_path = run_dir / 'test_metrics_unregistered.json'
+        with open(run_path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2)
+        if verbose:
+            print(f'Unregistered report (this run): {run_path}', flush=True)
+
     return unreg
 
 

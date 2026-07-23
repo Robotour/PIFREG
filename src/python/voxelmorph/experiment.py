@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from src.python.experiments.experiment_data import resolve_image_size
 from .networks import VxmDense
 from .training import (
     build_adjacent_band_pairs,
@@ -46,6 +47,49 @@ def create_run_dir(
     return run_dir
 
 
+def load_data_bundle_from_run(
+    run_dir: Path,
+    data_root: Path,
+    image_size=None,
+) -> Dict[str, Any]:
+    """Reload train/test split and pairs from an existing run (eval-only / reuse)."""
+    from src.python.preprocessing.image_pad import resolve_voxelmorph_canvas
+
+    manifest_path = Path(run_dir) / 'split_manifest.json'
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f'Missing split manifest: {manifest_path}')
+    payload = json.loads(manifest_path.read_text(encoding='utf-8'))
+    train_folders = [Path(p) for p in payload['train_sessions']]
+    test_folders = [Path(p) for p in payload['test_sessions']]
+    image_size = resolve_image_size(image_size)
+    all_folders = discover_band_folders([data_root])
+    cfg_path = Path(run_dir) / 'config.json'
+    if cfg_path.is_file():
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        if cfg.get('image_size'):
+            image_size = tuple(cfg['image_size'])
+    canvas_shape = resolve_voxelmorph_canvas(all_folders, image_size=image_size)
+    if cfg_path.is_file():
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        if cfg.get('canvas_shape'):
+            canvas_shape = tuple(cfg['canvas_shape'])
+    train_pairs = build_adjacent_band_pairs(
+        train_folders, image_size=image_size, canvas_shape=canvas_shape,
+    )
+    test_pairs = build_adjacent_band_pairs(
+        test_folders, image_size=image_size, canvas_shape=canvas_shape,
+    )
+    return {
+        'folders': all_folders,
+        'train_folders': train_folders,
+        'test_folders': test_folders,
+        'train_pairs': train_pairs,
+        'test_pairs': test_pairs,
+        'inshape': canvas_shape,
+        'canvas_shape': canvas_shape,
+    }
+
+
 def prepare_data_split(
     data_root: Path,
     run_dir: Path,
@@ -55,6 +99,7 @@ def prepare_data_split(
 ) -> Dict[str, Any]:
     from src.python.preprocessing.image_pad import resolve_voxelmorph_canvas
 
+    image_size = resolve_image_size(image_size)
     folders = discover_band_folders([data_root])
     train_folders, test_folders = split_folders_train_test(
         folders, train_ratio=train_ratio, seed=seed,
@@ -146,8 +191,17 @@ def evaluate_run(
     smooth_flow_sigma: float = 1.5,
     method_name: str = 'voxelmorph',
 ) -> Dict[str, Any]:
+    from src.python.experiments.split_eval_manifest import (
+        assert_test_set_matches_run,
+        load_test_eval_manifest,
+        verify_same_test_set,
+    )
     from src.python.experiments.stack_pairwise_metrics import evaluate_test_sessions_all_pairs
     from .training import register_stack_with_voxelmorph_chain
+
+    assert_test_set_matches_run(
+        run_dir, data_bundle['test_folders'], context='Final test evaluation',
+    )
 
     model = VxmDense.load(str(checkpoint), device)
     canvas_shape = canvas_shape or data_bundle.get('canvas_shape') or tuple(
@@ -190,9 +244,26 @@ def evaluate_run(
         max_sessions=None,
         verbose=True,
     )
+
+    test_eval_meta = {}
+    manifest_path = Path(run_dir) / 'test_eval_manifest.json'
+    if manifest_path.is_file():
+        test_eval_meta = load_test_eval_manifest(manifest_path)
+    unreg_path = Path(run_dir) / 'test_metrics_unregistered.json'
+    unreg_check = None
+    if unreg_path.is_file():
+        unreg_payload = json.loads(unreg_path.read_text(encoding='utf-8'))
+        unreg_check = verify_same_test_set(test_eval_meta or unreg_payload, unreg_payload)
+
     payload = {
+        'stage': 'after',
         'checkpoint': str(checkpoint.resolve()),
         'canvas_shape': list(canvas_shape),
+        'test_set_fingerprint': test_eval_meta.get('test_set_fingerprint'),
+        'test_sessions': test_eval_meta.get('test_sessions'),
+        'same_test_set_as_unregistered': (
+            unreg_check['ok'] if unreg_check is not None else None
+        ),
         'pair_eval': pair_result,
         'stack_eval': stack_result,
         'all_pairs_eval': all_pairs_eval,
@@ -256,16 +327,60 @@ def run_full_experiment(
     """Train -> save best.pt -> eval all test -> visualize all test sessions."""
     train_kwargs = dict(train_kwargs or {})
     data_root = project_root / data_dir
+    image_size = resolve_image_size(image_size)
     run_dir = run_dir or create_run_dir(project_root, method, exp_name)
-    data_bundle = prepare_data_split(
-        data_root, run_dir, train_ratio=train_ratio, seed=seed, image_size=image_size,
-    )
+    if skip_train:
+        data_bundle = load_data_bundle_from_run(run_dir, data_root, image_size=image_size)
+        print(f'Reloaded fixed split from {run_dir / "split_manifest.json"}', flush=True)
+    else:
+        data_bundle = prepare_data_split(
+            data_root, run_dir, train_ratio=train_ratio, seed=seed, image_size=image_size,
+        )
     canvas = data_bundle['canvas_shape']
     print(
-        f'VoxelMorph canvas: {canvas[1]}x{canvas[0]} (WxH), '
-        f'zero-padded to divisor 16 for U-Net',
+        f'Image size: {resolve_image_size(image_size)[0]}x{resolve_image_size(image_size)[1]} (WxH), '
+        f'model canvas {canvas[1]}x{canvas[0]}',
         flush=True,
     )
+
+    from src.python.experiments.split_eval_manifest import (
+        build_test_eval_manifest,
+        print_test_eval_banner,
+        save_test_eval_manifest,
+    )
+    from src.python.experiments.metrics_csv import save_unregistered_metrics_report
+    from src.python.experiments.session_outputs import print_metrics_summary
+
+    manifest_path = run_dir / 'test_eval_manifest.json'
+    if skip_train and manifest_path.is_file():
+        from src.python.experiments.split_eval_manifest import load_test_eval_manifest
+        test_eval_manifest = load_test_eval_manifest(run_dir)
+        print(f'Reloaded test eval manifest: {manifest_path}', flush=True)
+    else:
+        test_eval_manifest = build_test_eval_manifest(
+            seed,
+            data_bundle['train_folders'],
+            data_bundle['test_folders'],
+            train_ratio,
+            data_dir=str(data_root.resolve()),
+            image_size=image_size,
+        )
+        save_test_eval_manifest(run_dir, test_eval_manifest)
+    print_test_eval_banner(test_eval_manifest, run_dir)
+
+    unreg_run_path = run_dir / 'test_metrics_unregistered.json'
+    if skip_train and unreg_run_path.is_file():
+        print(f'Using existing unregistered metrics: {unreg_run_path}', flush=True)
+    else:
+        save_unregistered_metrics_report(
+            project_root,
+            seed,
+            data_bundle['test_folders'],
+            image_size=image_size,
+            run_dir=run_dir,
+            test_eval_manifest=test_eval_manifest,
+            verbose=True,
+        )
 
     config = {
         'method': method,
@@ -275,13 +390,14 @@ def run_full_experiment(
         'run_dir': str(run_dir.resolve()),
         'train_ratio': train_ratio,
         'seed': seed,
-        'image_size': list(image_size) if image_size is not None else None,
+        'image_size': list(image_size),
         'canvas_shape': list(data_bundle['canvas_shape']),
         'chain_descending': chain_descending,
         'smooth_flow_sigma': smooth_flow_sigma,
         'num_sessions': len(data_bundle['folders']),
         'num_train_sessions': len(data_bundle['train_folders']),
         'num_test_sessions': len(data_bundle['test_folders']),
+        'test_set_fingerprint': test_eval_manifest['test_set_fingerprint'],
         'train_kwargs': train_kwargs,
     }
     with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
@@ -297,17 +413,6 @@ def run_full_experiment(
 
     best_path = Path(best_path)
     csv_method_name = f'voxelmorph_{method}'
-
-    from src.python.experiments.metrics_csv import save_unregistered_metrics_report
-    from src.python.experiments.session_outputs import print_metrics_summary
-
-    save_unregistered_metrics_report(
-        project_root,
-        seed,
-        data_bundle['test_folders'],
-        image_size=image_size,
-        verbose=True,
-    )
 
     metrics = evaluate_run(
         run_dir,
@@ -325,6 +430,10 @@ def run_full_experiment(
     print_metrics_summary('Before (unregistered)', all_pairs['summary_before'])
     print_metrics_summary('After  (registered)  ', all_pairs['summary_after'])
     print_metrics_summary('Delta (after-before) ', all_pairs['summary_delta'])
+    if metrics.get('same_test_set_as_unregistered') is True:
+        print('Verified: after metrics use the same test set as test_metrics_unregistered.json', flush=True)
+    elif metrics.get('same_test_set_as_unregistered') is False:
+        print('WARNING: test set fingerprint mismatch vs unregistered baseline', flush=True)
 
     if write_metrics_csv:
         from src.python.experiments.metrics_csv import (

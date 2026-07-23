@@ -111,10 +111,9 @@ def resolve_voxelmorph_canvas(
     """
     Return (canvas_h, canvas_w) for model I/O.
 
-    image_size: optional OpenCV (width, height) resize before padding.
+    image_size: OpenCV (width, height); default 512×512 (no native-resolution scan).
     """
-    if image_size is not None:
-        w, h = image_size
-    else:
-        h, w = scan_folders_max_shape(folders)
+    from src.python.experiments.experiment_data import resolve_image_size
+
+    w, h = resolve_image_size(image_size)
     return ceil_to_divisor(h, divisor), ceil_to_divisor(w, divisor)
