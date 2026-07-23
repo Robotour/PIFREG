@@ -12,6 +12,12 @@ description: >-
 
 **Default image size: 512×512** (do not downsample to 256 unless debugging).
 
+**Default preprocessing: per-band histogram equalization** for registration optimization only.
+Displacement / global transforms are always applied to **raw resized grayscale** (`bands_raw`), not to hist-eq images.
+Chain methods refresh hist-eq from warped raw before the next pairwise step.
+
+Utility: `src/python/preprocessing/band_preprocess.py` (`histogram_equalize_band`, `refresh_histogram_equalized`).
+
 ## Metrics comparison CSV (one file per random seed)
 
 Path: `outputs/metrics_tables/seed_{seed}.csv`

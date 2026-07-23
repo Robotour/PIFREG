@@ -9,16 +9,18 @@ import cv2
 import numpy as np
 import torch
 
-
-def _normalize_band(img):
-    img = img.astype(np.float32)
-    vmin, vmax = np.min(img), np.max(img)
-    if vmax > vmin:
-        img = (img - vmin) / (vmax - vmin)
-    return img
+from src.python.preprocessing.band_preprocess import histogram_equalize_band
 
 
-def load_band_image(path, image_size=None):
+def _preprocess_band(img):
+    return histogram_equalize_band(img)
+
+
+# Backward-compatible alias used by visualize script
+_normalize_band = _preprocess_band
+
+
+def load_band_image(path, image_size=None, return_raw=False):
     path = Path(path)
     if not path.is_file() or path.stat().st_size <= 0:
         raise ValueError(f'Failed to read image (empty/missing): {path}')
@@ -27,7 +29,11 @@ def load_band_image(path, image_size=None):
         raise ValueError(f'Failed to read image: {path}')
     if image_size is not None:
         img = cv2.resize(img, image_size)
-    return _normalize_band(img)
+    raw = img.astype(np.float32)
+    prep = _preprocess_band(raw)
+    if return_raw:
+        return prep, raw
+    return prep
 
 
 def _list_readable_band_files(folder):
@@ -307,6 +313,7 @@ def select_best_checkpoint(model_dir, metric='NCC_after', history_name='train_hi
 def register_stack_with_voxelmorph_chain(
     model,
     bands,
+    bands_raw=None,
     device='cuda',
     descending=True,
     smooth_flow_sigma=0.0,
@@ -314,48 +321,50 @@ def register_stack_with_voxelmorph_chain(
     """
     用相邻波段 VoxelMorph 沿波长链配准整栈。
 
-    训练配对约定：moving=较短波长, fixed=较长波长（升序相邻）。
-    descending=True：从长波锚点向短波逐对配准（与 PIFReg chain 一致）。
-
-    smooth_flow_sigma>0 时对每步 flow 做高斯平滑，减轻链式毛刺。
+    在直方图均衡图 (bands) 上估计 flow，将 flow 作用于 bands_raw（原图）。
+    链上下一步 fixed 为「上一 band 原图 warp 后再直方图均衡」的结果。
 
     Returns:
-        registered bands (list of float32 arrays), list of per-step info
+        registered raw bands, list of per-step info (flow stored for raw warp)
     """
+    from src.python.preprocessing.band_preprocess import refresh_histogram_equalized
+
     if isinstance(device, str):
         device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
     model.eval()
     model = model.to(device)
-    registered = [np.asarray(b, dtype=np.float32).copy() for b in bands]
-    n = len(registered)
+    eq_list = [np.asarray(b, dtype=np.float32).copy() for b in bands]
+    raw_list = [
+        np.asarray(b, dtype=np.float32).copy()
+        for b in (bands_raw if bands_raw is not None else bands)
+    ]
+    n = len(eq_list)
     if n < 2:
-        return registered, []
+        return raw_list, []
 
     steps = []
     with torch.no_grad():
         pair_indices = _chain_pair_indices(n, descending=descending)
 
         for step, (fixed_idx, moving_idx) in enumerate(pair_indices, start=1):
-            moving = registered[moving_idx]
-            fixed = registered[fixed_idx]
-            moving_t = torch.from_numpy(moving).float().unsqueeze(0).unsqueeze(0).to(device)
-            fixed_t = torch.from_numpy(fixed).float().unsqueeze(0).unsqueeze(0).to(device)
-            warped_t, flow_t = model(moving_t, fixed_t, registration=True)
+            moving_eq = eq_list[moving_idx]
+            fixed_eq = eq_list[fixed_idx]
+            moving_t = torch.from_numpy(moving_eq).float().unsqueeze(0).unsqueeze(0).to(device)
+            fixed_t = torch.from_numpy(fixed_eq).float().unsqueeze(0).unsqueeze(0).to(device)
+            _, flow_t = model(moving_t, fixed_t, registration=True)
             flow = flow_t.squeeze(0).detach().cpu().numpy().astype(np.float32)
             if smooth_flow_sigma and smooth_flow_sigma > 0:
                 flow = smooth_flow_2d(flow, sigma=float(smooth_flow_sigma))
-                warped = warp_band_with_flow(moving, flow, device=device)
-            else:
-                warped = warped_t.squeeze().detach().cpu().numpy().astype(np.float32)
-            registered[moving_idx] = warped
+            raw_list[moving_idx] = warp_band_with_flow(raw_list[moving_idx], flow, device=device)
+            eq_list[moving_idx] = refresh_histogram_equalized(raw_list[moving_idx])
             steps.append({
                 'step': step,
                 'fixed_idx': fixed_idx,
                 'moving_idx': moving_idx,
                 'flow': flow,
             })
-    return registered, steps
+    return raw_list, steps
 
 
 def warp_band_with_flow(band, flow, device='cpu'):
@@ -431,10 +440,14 @@ def compute_spatial_weight_map(
 
 
 def load_session_bands(folder, image_size=None):
-    """Load normalized bands for one session, sorted by wavelength."""
+    """Load hist-eq bands (for model) and raw bands (for warping/metrics) per session."""
     files = _list_readable_band_files(Path(folder))
-    bands = [load_band_image(p, image_size=image_size) for p in files]
-    return bands, [str(p) for p in files]
+    bands_eq, bands_raw = [], []
+    for p in files:
+        prep, raw = load_band_image(p, image_size=image_size, return_raw=True)
+        bands_eq.append(prep)
+        bands_raw.append(raw)
+    return bands_eq, bands_raw, [str(p) for p in files]
 
 
 def stack_subchain_generator(folders, subchain_len=6, image_size=None):
@@ -446,14 +459,14 @@ def stack_subchain_generator(folders, subchain_len=6, image_size=None):
     folders = list(folders)
     while True:
         folder = folders[np.random.randint(len(folders))]
-        bands, _ = load_session_bands(folder, image_size=image_size)
-        if len(bands) < 2:
+        bands_eq, _, _ = load_session_bands(folder, image_size=image_size)
+        if len(bands_eq) < 2:
             continue
-        k = min(subchain_len, len(bands))
+        k = min(subchain_len, len(bands_eq))
         if k < 2:
             continue
-        start = np.random.randint(0, len(bands) - k + 1)
-        yield bands[start : start + k]
+        start = np.random.randint(0, len(bands_eq) - k + 1)
+        yield bands_eq[start : start + k]
 
 
 def _chain_pair_indices(n, descending=True):
@@ -484,19 +497,20 @@ def evaluate_voxelmorph_sessions(
 
     rows = []
     for idx, folder in enumerate(eval_folders):
-        bands, _ = load_session_bands(folder, image_size=image_size)
-        registered, _ = register_stack_with_voxelmorph_chain(
+        bands_eq, bands_raw, _ = load_session_bands(folder, image_size=image_size)
+        registered_raw, _ = register_stack_with_voxelmorph_chain(
             model,
-            bands,
+            bands_eq,
+            bands_raw=bands_raw,
             device=device,
             descending=descending,
             smooth_flow_sigma=smooth_flow_sigma,
         )
-        anchor = len(bands) - 1 if descending else 0
-        ref = registered[anchor]
+        anchor = len(bands_raw) - 1 if descending else 0
+        ref = registered_raw[anchor]
         ncc_before = []
         ncc_after = []
-        for i, (b, r) in enumerate(zip(bands, registered)):
+        for i, (b, r) in enumerate(zip(bands_raw, registered_raw)):
             if i == anchor:
                 continue
             ncc_before.append(float(compute_NCC(ref, b)))

@@ -49,15 +49,15 @@ def compute_stack_all_pairs_mean(bands: Sequence[np.ndarray]) -> Dict[str, float
 def evaluate_test_sessions_all_pairs(
     test_folders: Sequence,
     image_size=(512, 512),
-    register_fn: Optional[Callable[[List[np.ndarray]], List[np.ndarray]]] = None,
+    register_fn: Optional[Callable[[List[np.ndarray], List[np.ndarray]], List[np.ndarray]]] = None,
     max_sessions: Optional[int] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """
     Evaluate all test sessions with all-band pairwise mean metrics.
 
-    register_fn=None  -> unregistered stacks (before registration).
-    register_fn(bands) -> registered stacks; metrics computed on warped bands.
+    register_fn=None  -> unregistered raw stacks (before registration).
+    register_fn(bands_eq, bands_raw) -> warped raw bands; metrics on raw.
     """
     eval_folders = list(test_folders)
     if max_sessions is not None and max_sessions < len(eval_folders):
@@ -66,18 +66,18 @@ def evaluate_test_sessions_all_pairs(
 
     rows = []
     for idx, folder in enumerate(eval_folders):
-        bands, _, _ = load_hsi_stack(folder, image_size=image_size)
-        before = compute_stack_all_pairs_mean(bands)
+        bands_eq, bands_raw, _ = load_hsi_stack(folder, image_size=image_size)
+        before = compute_stack_all_pairs_mean(bands_raw)
         if register_fn is None:
             after = before
         else:
-            bands_after = register_fn(bands)
-            after = compute_stack_all_pairs_mean(bands_after)
+            bands_raw_after = register_fn(bands_eq, bands_raw)
+            after = compute_stack_all_pairs_mean(bands_raw_after)
 
         row = {
             'session': str(folder),
-            'num_bands': len(bands),
-            'num_pairs': len(bands) * (len(bands) - 1) // 2,
+            'num_bands': len(bands_raw),
+            'num_pairs': len(bands_raw) * (len(bands_raw) - 1) // 2,
             'before': before,
             'after': after,
         }

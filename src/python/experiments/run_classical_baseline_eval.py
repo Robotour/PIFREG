@@ -113,19 +113,14 @@ def visualize_sessions(
     for si, folder in enumerate(folders, start=1):
         out_dir = viz_root / f'{si:02d}_{folder.name}'
         out_dir.mkdir(parents=True, exist_ok=True)
-        bands_norm, bands_raw, _ = load_hsi_stack(folder, image_size=image_size)
-        bands_after = register_stack_classical(
-            method, bands_norm, descending=descending, **register_kwargs,
+        bands_eq, bands_raw, _ = load_hsi_stack(folder, image_size=image_size)
+        bands_raw_after = register_stack_classical(
+            method,
+            bands_eq,
+            bands_raw=bands_raw,
+            descending=descending,
+            **register_kwargs,
         )
-        # RGB from raw intensities; classical methods warp normalized bands only.
-        # Scale warped normalized back to raw range per band for display.
-        bands_raw_after = []
-        for raw, norm, warped in zip(bands_raw, bands_norm, bands_after):
-            lo, hi = float(raw.min()), float(raw.max())
-            if hi > lo:
-                bands_raw_after.append(warped * (hi - lo) + lo)
-            else:
-                bands_raw_after.append(warped.copy())
 
         rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
         rgb_after = hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path))

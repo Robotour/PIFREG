@@ -166,13 +166,14 @@ def visualize_test_sessions(
         run_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n[{si}/{len(chosen)}] {folder}")
 
-        bands_norm, bands_raw, band_files, wavelengths = _load_stack(folder, image_size)
-        bands_norm_after, chain_steps = register_stack_with_voxelmorph_chain(
-            model, bands_norm, device=device, descending=descending,
+        bands_eq, bands_raw, band_files, wavelengths = _load_stack(folder, image_size)
+        bands_raw_after, chain_steps = register_stack_with_voxelmorph_chain(
+            model,
+            bands_eq,
+            bands_raw=bands_raw,
+            device=device,
+            descending=descending,
             smooth_flow_sigma=smooth_flow_sigma,
-        )
-        bands_raw_after = register_raw_stack_with_chain_flows(
-            bands_raw, chain_steps, device=device,
         )
 
         rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))

@@ -133,15 +133,16 @@ def evaluate_run(
 
     model = VxmDense.load(str(checkpoint), device)
 
-    def _register_fn(bands):
-        registered, _ = register_stack_with_voxelmorph_chain(
+    def _register_fn(bands_eq, bands_raw):
+        registered_raw, _ = register_stack_with_voxelmorph_chain(
             model,
-            bands,
+            bands_eq,
+            bands_raw=bands_raw,
             device=device,
             descending=chain_descending,
             smooth_flow_sigma=smooth_flow_sigma,
         )
-        return registered
+        return registered_raw
 
     pair_result = evaluate_voxelmorph_pairs(
         model,

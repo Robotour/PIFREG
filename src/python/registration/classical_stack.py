@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..preprocessing.band_preprocess import refresh_histogram_equalized
 from .methods import (
     register_elastix_chain,
     register_elastix_groupwise,
@@ -31,118 +32,137 @@ def anchor_index(n: int, descending: bool = True) -> int:
     return n - 1 if descending else 0
 
 
+def _coerce_eq_raw(
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]],
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    eq = [np.asarray(b, dtype=np.float32).copy() for b in bands_eq]
+    raw = [np.asarray(b, dtype=np.float32).copy() for b in (bands_raw if bands_raw is not None else bands_eq)]
+    if len(eq) != len(raw):
+        raise ValueError(f'bands_eq length {len(eq)} != bands_raw length {len(raw)}')
+    return eq, raw
+
+
 def register_stack_elastix_chain(
-    bands: Sequence[np.ndarray],
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]] = None,
     epochs: int = 20,
     spacinginvoxels: int = 20,
     descending: bool = True,
 ) -> List[np.ndarray]:
-    """Pairwise Elastix along wavelength chain (same inference graph as VoxelMorph chain)."""
+    """Pairwise Elastix chain: estimate on hist-eq, warp raw."""
+    eq, raw = _coerce_eq_raw(bands_eq, bands_raw)
     return register_elastix_chain(
-        bands,
+        eq,
         epochs=epochs,
         spacinginvoxels=spacinginvoxels,
         descending=descending,
+        raw_list=raw,
     )
 
 
 def register_stack_stackreg_chain(
-    bands: Sequence[np.ndarray],
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]] = None,
     transform_type: str = 'bilinear',
     descending: bool = True,
 ) -> List[np.ndarray]:
-    """Pairwise StackReg along wavelength chain."""
-    registered = [np.asarray(b, dtype=np.float32).copy() for b in bands]
-    if len(registered) < 2:
-        return registered
-    for fixed_idx, moving_idx in chain_pair_indices(len(registered), descending=descending):
-        registered[moving_idx] = register_stackreg(
-            registered[fixed_idx],
-            registered[moving_idx],
+    """Pairwise StackReg chain: estimate on hist-eq, transform raw."""
+    eq_list, raw_list = _coerce_eq_raw(bands_eq, bands_raw)
+    if len(eq_list) < 2:
+        return raw_list
+    for fixed_idx, moving_idx in chain_pair_indices(len(eq_list), descending=descending):
+        raw_list[moving_idx] = register_stackreg(
+            eq_list[fixed_idx],
+            eq_list[moving_idx],
             transform_type=transform_type,
+            moving_raw=raw_list[moving_idx],
         )
-    return registered
+        eq_list[moving_idx] = refresh_histogram_equalized(raw_list[moving_idx])
+    return raw_list
 
 
 def register_stack_keren(
-    bands: Sequence[np.ndarray],
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]] = None,
     descending: bool = True,
 ) -> List[np.ndarray]:
-    """
-    KEREN pyramid LK: all bands aligned to one reference band.
-
-    VoxelMorph chain uses the longest-wavelength band as anchor; KEREN uses img_list[0]
-    as reference, so we reverse order when descending=True.
-    """
+    """KEREN on hist-eq; apply estimated rigid motion to raw bands."""
     from ..utils.image_transform import shift_and_rotate
 
-    bands = [np.asarray(b, dtype=np.float32) for b in bands]
-    if len(bands) < 2:
-        return [b.copy() for b in bands]
+    eq_list, raw_list = _coerce_eq_raw(bands_eq, bands_raw)
+    if len(eq_list) < 2:
+        return raw_list
 
     if descending:
-        work = list(reversed(bands))
+        eq_work = list(reversed(eq_list))
+        raw_work = list(reversed(raw_list))
     else:
-        work = list(bands)
+        eq_work = list(eq_list)
+        raw_work = list(raw_list)
 
-    delta_est, phi_est = register_keren(work)
-    registered_work = [work[0].copy()]
-    for i in range(1, len(work)):
-        registered_work.append(
-            shift_and_rotate(work[i], delta_est[i, 0], delta_est[i, 1], phi_est[i])
+    delta_est, phi_est = register_keren(eq_work)
+    registered_raw = [raw_work[0].copy()]
+    for i in range(1, len(raw_work)):
+        registered_raw.append(
+            shift_and_rotate(raw_work[i], delta_est[i, 0], delta_est[i, 1], phi_est[i])
         )
 
     if descending:
-        return list(reversed(registered_work))
-    return registered_work
+        return list(reversed(registered_raw))
+    return registered_raw
 
 
 def register_stack_elastix_groupwise(
-    bands: Sequence[np.ndarray],
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]] = None,
     epochs: int = 80,
     spacinginvoxels: int = 20,
     verbose: int = 0,
 ) -> List[np.ndarray]:
-    """Elastix BSplineStackTransform groupwise registration on the full stack."""
-    bands = [np.asarray(b, dtype=np.float32) for b in bands]
-    registered, _ = register_elastix_groupwise(
-        bands,
+    """Elastix groupwise on hist-eq stack; apply fields to raw bands."""
+    from src.python.experiments.experiment_data import warp_bands_with_elastix_fields
+
+    eq_list, raw_list = _coerce_eq_raw(bands_eq, bands_raw)
+    _, fields = register_elastix_groupwise(
+        eq_list,
         epochs=epochs,
         spacinginvoxels=spacinginvoxels,
         verbose=verbose,
     )
-    return registered
+    return warp_bands_with_elastix_fields(raw_list, fields)
 
 
 def register_stack_classical(
     method: str,
-    bands: Sequence[np.ndarray],
+    bands_eq: Sequence[np.ndarray],
+    bands_raw: Optional[Sequence[np.ndarray]] = None,
     descending: bool = True,
     **kwargs,
 ) -> List[np.ndarray]:
+    """Register full stack; returns warped **raw** intensity bands."""
     method = method.lower()
+    common = dict(bands_eq=bands_eq, bands_raw=bands_raw, descending=descending)
     if method == 'elastix_groupwise':
         return register_stack_elastix_groupwise(
-            bands,
+            **common,
             epochs=kwargs.get('epochs', 80),
             spacinginvoxels=kwargs.get('spacinginvoxels', 20),
             verbose=kwargs.get('elastix_verbose', kwargs.get('verbose', 0)),
         )
     if method == 'elastix_chain':
         return register_stack_elastix_chain(
-            bands,
+            **common,
             epochs=kwargs.get('epochs', 20),
             spacinginvoxels=kwargs.get('spacinginvoxels', 20),
-            descending=descending,
         )
     if method == 'stackreg_chain':
         return register_stack_stackreg_chain(
-            bands,
+            **common,
             transform_type=kwargs.get('transform_type', 'bilinear'),
-            descending=descending,
         )
     if method == 'keren':
-        return register_stack_keren(bands, descending=descending)
+        return register_stack_keren(**common)
     raise ValueError(f'Unknown classical method: {method}. Choose from {CLASSICAL_METHODS}')
 
 
@@ -151,12 +171,13 @@ def make_classical_register_fn(
     descending: bool = True,
     **register_kwargs,
 ):
-    """Return a bands -> registered_bands callable for stack_pairwise_metrics."""
+    """Return (bands_eq, bands_raw) -> warped raw bands."""
 
-    def _register(bands: List[np.ndarray]) -> List[np.ndarray]:
+    def _register(bands_eq: List[np.ndarray], bands_raw: List[np.ndarray]) -> List[np.ndarray]:
         return register_stack_classical(
             method,
-            bands,
+            bands_eq,
+            bands_raw=bands_raw,
             descending=descending,
             **register_kwargs,
         )
@@ -173,7 +194,7 @@ def evaluate_classical_sessions(
     verbose: bool = True,
     **register_kwargs,
 ) -> Dict[str, Any]:
-    """All-band pairwise mean metrics on test sessions (aligned with metrics CSV)."""
+    """All-band pairwise mean metrics on test sessions (metrics on raw bands)."""
     from src.python.experiments.stack_pairwise_metrics import evaluate_test_sessions_all_pairs
 
     return evaluate_test_sessions_all_pairs(

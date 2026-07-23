@@ -12,6 +12,44 @@ from scipy.ndimage import rotate
 
 from .pif_registration import register_pifreg
 from ..utils.image_transform import shift, shift_and_rotate
+from ..preprocessing.band_preprocess import histogram_equalize_band, refresh_histogram_equalized
+
+
+def _warp_with_elastix_field(moving_image, field):
+    """Apply Elastix (fx, fy) displacement field to an image."""
+    field_x = sitk.GetImageFromArray(field[0])
+    field_y = sitk.GetImageFromArray(field[1])
+    size = field_x.GetSize()
+    displacement_field = sitk.Image(size, sitk.sitkVectorFloat64)
+    for i in range(size[0]):
+        for j in range(size[1]):
+            displacement_field.SetPixel((i, j), [field_x.GetPixel((i, j)), field_y.GetPixel((i, j))])
+    field_sitk = sitk.DisplacementFieldTransform(displacement_field)
+    moving_sitk = sitk.GetImageFromArray(np.asarray(moving_image, dtype=np.float32))
+    moving_deformed_sitk = sitk.Resample(moving_sitk, field_sitk)
+    return sitk.GetArrayFromImage(moving_deformed_sitk).astype(np.float32)
+
+
+def register_elastix(
+    fixed_image,
+    moving_image,
+    epochs=20,
+    spacinginvoxels=20,
+    moving_raw=None,
+):
+    """
+    Elastix传统配准方法
+
+    在 fixed_image / moving_image（通常为直方图均衡图）上估计位移场，
+    将位移场作用于 moving_raw（原图）；若未提供 moving_raw 则作用于 moving_image。
+    """
+    params = pyelastix.get_default_params()
+    params.MaximumNumberOfIterations = epochs
+    params.FinalGridSpacingInVoxels = spacinginvoxels
+
+    _, field = pyelastix.register(moving_image, fixed_image, params)
+    warp_target = moving_raw if moving_raw is not None else moving_image
+    return _warp_with_elastix_field(warp_target, field)
 
 
 def register_voxelmorph(*args, **kwargs):
@@ -27,49 +65,6 @@ def register_voxelmorph(*args, **kwargs):
 
 
 # ============== Elastix 配准方法 ==============
-
-def register_elastix(fixed_image, moving_image, epochs=20, spacinginvoxels=20):
-    """
-    Elastix传统配准方法
-    
-    参数:
-        fixed_image: 固定图像 numpy数组
-        moving_image: 移动图像 numpy数组
-        epochs: 最大迭代次数，默认20
-        spacinginvoxels: 网格间距，默认20
-    
-    返回:
-        warped_image: 配准后的图像 numpy数组
-    """
-    # 设置 Elastix 参数
-    params = pyelastix.get_default_params()
-    params.MaximumNumberOfIterations = epochs
-    params.FinalGridSpacingInVoxels = spacinginvoxels
-
-    # 进行配准
-    registered_image, field = pyelastix.register(moving_image, fixed_image, params)
-
-    # 提取 X 和 Y 方向的位移场
-    field_x = sitk.GetImageFromArray(field[0])
-    field_y = sitk.GetImageFromArray(field[1])
-
-    # 创建位移场
-    size = field_x.GetSize()
-    displacement_field = sitk.Image(size, sitk.sitkVectorFloat64)
-
-    # 组合 X 和 Y 方向的位移
-    for i in range(size[0]):
-        for j in range(size[1]):
-            displacement_field.SetPixel((i, j), [field_x.GetPixel((i, j)), field_y.GetPixel((i, j))])
-
-    # 应用位移场对移动图像进行变形
-    field_sitk = sitk.DisplacementFieldTransform(displacement_field)
-    moving_sitk = sitk.GetImageFromArray(moving_image)
-    moving_deformed_sitk = sitk.Resample(moving_sitk, field_sitk)
-    moving_deformed = sitk.GetArrayFromImage(moving_deformed_sitk)
-
-    return moving_deformed.astype(np.float32)
-
 
 def register_elastix_groupwise(img_list, epochs=100, spacinginvoxels=20, verbose=1):
     """
@@ -112,33 +107,36 @@ def _chain_pair_indices(n, descending=True):
     return [(i - 1, i) for i in range(1, n)]
 
 
-def register_elastix_chain(img_list, epochs=20, spacinginvoxels=20, descending=True):
+def register_elastix_chain(
+    img_list,
+    epochs=20,
+    spacinginvoxels=20,
+    descending=True,
+    raw_list=None,
+):
     """
     Elastix 链式 pairwise 配准（与 VoxelMorph 推理链一致）
 
-    从锚点波段（默认最长波长）出发，逐对相邻波段做 Elastix B-spline 配准。
-    约 N-1 次 Elastix，比 groupwise 慢，但推理图与 DL chain 可直接对比。
-
-    参数:
-        img_list: 波段图像列表，每个元素 (H, W)，建议按波长升序
-        epochs: 每对 Elastix 最大迭代次数
-        spacinginvoxels: B 样条网格间距
-        descending: True 时锚点为最后一波段（长波），向短波链式配准
-
-    返回:
-        registered_list: 配准后的图像列表，长度与 img_list 相同
+    在直方图均衡图上估计位移，位移作用于原图；链上下一步 fixed 为
+    「上一 band 原图 warp 后再做直方图均衡」的结果。
     """
-    registered = [np.asarray(b, dtype=np.float32).copy() for b in img_list]
-    if len(registered) < 2:
-        return registered
-    for fixed_idx, moving_idx in _chain_pair_indices(len(registered), descending=descending):
-        registered[moving_idx] = register_elastix(
-            registered[fixed_idx],
-            registered[moving_idx],
+    eq_list = [np.asarray(b, dtype=np.float32).copy() for b in img_list]
+    raw_list = [
+        np.asarray(b, dtype=np.float32).copy()
+        for b in (raw_list if raw_list is not None else img_list)
+    ]
+    if len(eq_list) < 2:
+        return raw_list
+    for fixed_idx, moving_idx in _chain_pair_indices(len(eq_list), descending=descending):
+        raw_list[moving_idx] = register_elastix(
+            eq_list[fixed_idx],
+            eq_list[moving_idx],
             epochs=epochs,
             spacinginvoxels=spacinginvoxels,
+            moving_raw=raw_list[moving_idx],
         )
-    return registered
+        eq_list[moving_idx] = refresh_histogram_equalized(raw_list[moving_idx])
+    return raw_list
 
 
 def register_elastix_edge(fixed_image, moving_image, epochs=20, spacinginvoxels=20):
@@ -170,23 +168,7 @@ def register_elastix_edge(fixed_image, moving_image, epochs=20, spacinginvoxels=
     # 进行配准（使用边缘图像）
     _, field = pyelastix.register(moving_edge, fixed_edge, params)
 
-    # 提取位移场
-    field_x = sitk.GetImageFromArray(field[0])
-    field_y = sitk.GetImageFromArray(field[1])
-    size = field_x.GetSize()
-    displacement_field = sitk.Image(size, sitk.sitkVectorFloat64)
-
-    for i in range(size[0]):
-        for j in range(size[1]):
-            displacement_field.SetPixel((i, j), [field_x.GetPixel((i, j)), field_y.GetPixel((i, j))])
-
-    # 应用位移场到原始图像
-    field_sitk = sitk.DisplacementFieldTransform(displacement_field)
-    moving_sitk = sitk.GetImageFromArray(moving_image)
-    moving_deformed_sitk = sitk.Resample(moving_sitk, field_sitk)
-    moving_deformed = sitk.GetArrayFromImage(moving_deformed_sitk)
-
-    return moving_deformed.astype(np.float32)
+    return _warp_with_elastix_field(moving_image, field)
 
 
 def register_elastix_histogram(fixed_image, moving_image, epochs=20, spacinginvoxels=20):
@@ -216,36 +198,17 @@ def register_elastix_histogram(fixed_image, moving_image, epochs=20, spacinginvo
 
     _, field = pyelastix.register(matched_moving_image, fixed_image_nor, params)
 
-    field_x = sitk.GetImageFromArray(field[0])
-    field_y = sitk.GetImageFromArray(field[1])
-    size = field_x.GetSize()
-    displacement_field = sitk.Image(size, sitk.sitkVectorFloat64)
-
-    for i in range(size[0]):
-        for j in range(size[1]):
-            displacement_field.SetPixel((i, j), [field_x.GetPixel((i, j)), field_y.GetPixel((i, j))])
-
-    field_sitk = sitk.DisplacementFieldTransform(displacement_field)
-    moving_sitk = sitk.GetImageFromArray(moving_image)
-    moving_deformed_sitk = sitk.Resample(moving_sitk, field_sitk)
-    moving_deformed = sitk.GetArrayFromImage(moving_deformed_sitk)
-
-    return moving_deformed.astype(np.float32)
+    return _warp_with_elastix_field(moving_image, field)
 
 
 # ============== StackReg 配准方法 ==============
 
-def register_stackreg(fixed_image, moving_image, transform_type='bilinear'):
+def register_stackreg(fixed_image, moving_image, transform_type='bilinear', moving_raw=None):
     """
     StackReg堆栈配准方法
-    
-    参数:
-        fixed_image: 固定图像
-        moving_image: 移动图像
-        transform_type: 变换类型，可选'translation', 'rigid', 'scaled_rotation', 'affine', 'bilinear'
-    
-    返回:
-        warped_image: 配准后的图像
+
+    在 fixed_image / moving_image（直方图均衡）上估计变换，
+    将变换作用于 moving_raw（原图）；未提供时作用于 moving_image。
     """
     if transform_type == 'translation':
         sr = StackReg(StackReg.TRANSLATION)
@@ -261,7 +224,8 @@ def register_stackreg(fixed_image, moving_image, transform_type='bilinear'):
         raise ValueError(f"不支持的 transform_type: {transform_type}")
 
     sr.register(fixed_image, moving_image)
-    registered_image = sr.transform(moving_image)
+    warp_target = moving_raw if moving_raw is not None else moving_image
+    registered_image = sr.transform(warp_target)
 
     return registered_image.astype(np.float32)
 

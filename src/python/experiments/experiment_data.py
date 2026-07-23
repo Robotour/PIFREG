@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from src.python.preprocessing.band_preprocess import histogram_equalize_band
 from src.python.metrics import compute_MI, compute_NMI, compute_NCC, compute_NTG
 
 
@@ -57,13 +58,13 @@ def load_hsi_stack(
     加载高光谱栈。
 
     返回:
-        bands_norm: 逐波段 min-max 归一化（配准/指标）
-        bands_raw: 原图灰度强度（保存/RGB）
+        bands_prep: 逐波段直方图均衡（配准优化输入）
+        bands_raw: resize 后原图灰度强度（位移/变换作用对象 + 指标/RGB）
         band_files: 文件路径列表
         [wavelengths]: 可选波长 stem 列表
     """
     band_files = sort_band_files(Path(folder))
-    bands_norm, bands_raw, wavelengths = [], [], []
+    bands_prep, bands_raw, wavelengths = [], [], []
     for path in band_files:
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
@@ -72,14 +73,11 @@ def load_hsi_stack(
         if image_size is not None:
             img = cv2.resize(img, image_size)
         bands_raw.append(img.copy())
-        lo, hi = float(np.min(img)), float(np.max(img))
-        if hi > lo:
-            img = (img - lo) / (hi - lo)
-        bands_norm.append(img)
+        bands_prep.append(histogram_equalize_band(img))
         wavelengths.append(path.stem)
     if return_wavelengths:
-        return bands_norm, bands_raw, band_files, wavelengths
-    return bands_norm, bands_raw, band_files
+        return bands_prep, bands_raw, band_files, wavelengths
+    return bands_prep, bands_raw, band_files
 
 
 def load_pair_images(
@@ -100,8 +98,8 @@ def load_pair_images(
         fixed = cv2.resize(fixed, image_size)
         moving = cv2.resize(moving, image_size)
     fixed_raw, moving_raw = fixed.copy(), moving.copy()
-    fixed = (fixed - fixed.min()) / (fixed.max() - fixed.min())
-    moving = (moving - moving.min()) / (moving.max() - moving.min())
+    fixed = histogram_equalize_band(fixed)
+    moving = histogram_equalize_band(moving)
     return fixed, moving, fixed_raw, moving_raw
 
 
