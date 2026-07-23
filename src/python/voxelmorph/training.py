@@ -10,6 +10,12 @@ import numpy as np
 import torch
 
 from src.python.preprocessing.band_preprocess import histogram_equalize_band
+from src.python.preprocessing.image_pad import (
+    PadInfo,
+    crop_flow,
+    pad_bottom_right,
+    pad_info_from_shape,
+)
 
 
 def _preprocess_band(img):
@@ -20,7 +26,13 @@ def _preprocess_band(img):
 _normalize_band = _preprocess_band
 
 
-def load_band_image(path, image_size=None, return_raw=False):
+def load_band_image(
+    path,
+    image_size=None,
+    canvas_shape=None,
+    return_raw=False,
+    return_pad_info=False,
+):
     path = Path(path)
     if not path.is_file() or path.stat().st_size <= 0:
         raise ValueError(f'Failed to read image (empty/missing): {path}')
@@ -30,9 +42,21 @@ def load_band_image(path, image_size=None, return_raw=False):
     if image_size is not None:
         img = cv2.resize(img, image_size)
     raw = img.astype(np.float32)
+    orig_h, orig_w = raw.shape[:2]
     prep = _preprocess_band(raw)
+
+    pad_info = None
+    if canvas_shape is not None:
+        ch, cw = canvas_shape
+        pad_info = pad_info_from_shape(orig_h, orig_w, ch, cw)
+        prep = pad_bottom_right(prep, ch, cw)
+
+    if return_raw and return_pad_info:
+        return prep, raw, pad_info
     if return_raw:
         return prep, raw
+    if return_pad_info:
+        return prep, pad_info
     return prep
 
 
@@ -88,7 +112,7 @@ def split_folders_train_test(folders, train_ratio=0.7, seed=42):
     return train_folders, test_folders
 
 
-def build_adjacent_band_pairs(folders, image_size=None):
+def build_adjacent_band_pairs(folders, image_size=None, canvas_shape=None):
     """Build (moving, fixed) pairs from adjacent bands in each folder."""
     pairs = []
     skipped_empty = 0
@@ -101,8 +125,12 @@ def build_adjacent_band_pairs(folders, image_size=None):
             continue
 
         for i in range(len(files) - 1):
-            moving = load_band_image(files[i], image_size=image_size)
-            fixed = load_band_image(files[i + 1], image_size=image_size)
+            moving = load_band_image(
+                files[i], image_size=image_size, canvas_shape=canvas_shape,
+            )
+            fixed = load_band_image(
+                files[i + 1], image_size=image_size, canvas_shape=canvas_shape,
+            )
             pairs.append((moving, fixed, str(files[i]), str(files[i + 1])))
 
     if skipped_empty:
@@ -317,12 +345,16 @@ def register_stack_with_voxelmorph_chain(
     device='cuda',
     descending=True,
     smooth_flow_sigma=0.0,
+    canvas_shape=None,
 ):
     """
     用相邻波段 VoxelMorph 沿波长链配准整栈。
 
     在直方图均衡图 (bands) 上估计 flow，将 flow 作用于 bands_raw（原图）。
     链上下一步 fixed 为「上一 band 原图 warp 后再直方图均衡」的结果。
+
+    canvas_shape: (H, W) padded canvas for the model; flows are cropped back to
+    each band's native size before warping raw images.
 
     Returns:
         registered raw bands, list of per-step info (flow stored for raw warp)
@@ -343,6 +375,9 @@ def register_stack_with_voxelmorph_chain(
     if n < 2:
         return raw_list, []
 
+    if canvas_shape is None:
+        canvas_shape = tuple(int(x) for x in model.config['inshape'])
+
     steps = []
     with torch.no_grad():
         pair_indices = _chain_pair_indices(n, descending=descending)
@@ -350,19 +385,36 @@ def register_stack_with_voxelmorph_chain(
         for step, (fixed_idx, moving_idx) in enumerate(pair_indices, start=1):
             moving_eq = eq_list[moving_idx]
             fixed_eq = eq_list[fixed_idx]
-            moving_t = torch.from_numpy(moving_eq).float().unsqueeze(0).unsqueeze(0).to(device)
-            fixed_t = torch.from_numpy(fixed_eq).float().unsqueeze(0).unsqueeze(0).to(device)
+            moving_raw = raw_list[moving_idx]
+            pad_info = pad_info_from_shape(
+                moving_raw.shape[0], moving_raw.shape[1], canvas_shape[0], canvas_shape[1],
+            )
+
+            moving_t = torch.from_numpy(
+                pad_bottom_right(moving_eq, canvas_shape[0], canvas_shape[1]),
+            ).float().unsqueeze(0).unsqueeze(0).to(device)
+            fixed_t = torch.from_numpy(
+                pad_bottom_right(fixed_eq, canvas_shape[0], canvas_shape[1]),
+            ).float().unsqueeze(0).unsqueeze(0).to(device)
             _, flow_t = model(moving_t, fixed_t, registration=True)
             flow = flow_t.squeeze(0).detach().cpu().numpy().astype(np.float32)
             if smooth_flow_sigma and smooth_flow_sigma > 0:
                 flow = smooth_flow_2d(flow, sigma=float(smooth_flow_sigma))
-            raw_list[moving_idx] = warp_band_with_flow(raw_list[moving_idx], flow, device=device)
+            flow_crop = crop_flow(flow, pad_info)
+            raw_list[moving_idx] = warp_band_with_flow(moving_raw, flow_crop, device=device)
             eq_list[moving_idx] = refresh_histogram_equalized(raw_list[moving_idx])
             steps.append({
                 'step': step,
                 'fixed_idx': fixed_idx,
                 'moving_idx': moving_idx,
-                'flow': flow,
+                'flow': flow_crop,
+                'flow_padded': flow,
+                'pad_info': {
+                    'orig_h': pad_info.orig_h,
+                    'orig_w': pad_info.orig_w,
+                    'canvas_h': pad_info.canvas_h,
+                    'canvas_w': pad_info.canvas_w,
+                },
             })
     return raw_list, steps
 
@@ -440,7 +492,7 @@ def compute_spatial_weight_map(
 
 
 def load_session_bands(folder, image_size=None):
-    """Load hist-eq bands (for model) and raw bands (for warping/metrics) per session."""
+    """Load native-size hist-eq bands (for model) and raw bands (for warping/metrics)."""
     files = _list_readable_band_files(Path(folder))
     bands_eq, bands_raw = [], []
     for p in files:
@@ -450,16 +502,19 @@ def load_session_bands(folder, image_size=None):
     return bands_eq, bands_raw, [str(p) for p in files]
 
 
-def stack_subchain_generator(folders, subchain_len=6, image_size=None):
+def stack_subchain_generator(folders, subchain_len=6, image_size=None, canvas_shape=None):
     """
     Yield contiguous sub-chains from random sessions for stack-aware training.
 
-    Each sample: list of normalized bands length K (K=subchain_len).
+    Each sample: list of normalized bands length K (K=subchain_len), padded to canvas_shape.
     """
     folders = list(folders)
     while True:
         folder = folders[np.random.randint(len(folders))]
         bands_eq, _, _ = load_session_bands(folder, image_size=image_size)
+        if canvas_shape is not None:
+            ch, cw = canvas_shape
+            bands_eq = [pad_bottom_right(b, ch, cw) for b in bands_eq]
         if len(bands_eq) < 2:
             continue
         k = min(subchain_len, len(bands_eq))
@@ -480,6 +535,7 @@ def evaluate_voxelmorph_sessions(
     folders,
     device='cuda',
     image_size=None,
+    canvas_shape=None,
     descending=True,
     smooth_flow_sigma=0.0,
     max_sessions=None,
@@ -490,6 +546,8 @@ def evaluate_voxelmorph_sessions(
 
     if isinstance(device, str):
         device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    if canvas_shape is None:
+        canvas_shape = tuple(int(x) for x in model.config['inshape'])
 
     eval_folders = list(folders)
     if max_sessions is not None and max_sessions < len(eval_folders):
@@ -505,6 +563,7 @@ def evaluate_voxelmorph_sessions(
             device=device,
             descending=descending,
             smooth_flow_sigma=smooth_flow_sigma,
+            canvas_shape=canvas_shape,
         )
         anchor = len(bands_raw) - 1 if descending else 0
         ref = registered_raw[anchor]
@@ -663,7 +722,12 @@ def _train_voxelmorph_core(
     grad_loss_func = Grad('l2', loss_mult=int_downsize).loss
     pair_generator = scan_to_scan_generator(pairs, batch_size=1) if pairs else None
     stack_generator = (
-        stack_subchain_generator(train_folders, subchain_len=subchain_len, image_size=inshape[::-1])
+        stack_subchain_generator(
+            train_folders,
+            subchain_len=subchain_len,
+            image_size=None,
+            canvas_shape=inshape,
+        )
         if train_folders else None
     )
     history = []
@@ -723,7 +787,7 @@ def _train_voxelmorph_core(
                     model,
                     val_folders,
                     device=device,
-                    image_size=inshape[::-1],
+                    canvas_shape=inshape,
                     descending=chain_descending,
                     max_sessions=val_session_steps,
                     verbose=False,

@@ -32,8 +32,7 @@ from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.classical_stack import anchor_index
 from src.python.voxelmorph.networks import VxmDense
 from src.python.voxelmorph.training import (
-    _list_readable_band_files,
-    _normalize_band,
+    load_session_bands,
     register_stack_with_voxelmorph_chain,
     select_best_checkpoint,
 )
@@ -42,24 +41,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "voxelmorph_cut_images_all"
 DEFAULT_SPECTRAL_PATH = PROJECT_ROOT / "HSI2RGB20240517.xlsx"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "voxelmorph_test_rgb"
-
-
-def _load_stack(folder, image_size):
-    files = _list_readable_band_files(Path(folder))
-    if len(files) < 2:
-        raise ValueError(f"Need >=2 readable bands in {folder}")
-    bands_norm, bands_raw, wavelengths = [], [], []
-    for path in files:
-        raw = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if raw is None:
-            continue
-        raw = raw.astype(np.float32)
-        if image_size is not None:
-            raw = cv2.resize(raw, image_size)
-        bands_raw.append(raw.copy())
-        bands_norm.append(_normalize_band(raw))
-        wavelengths.append(path.stem)
-    return bands_norm, bands_raw, files, wavelengths
 
 
 def _load_test_folders(model_dir, split_manifest=None):
@@ -80,6 +61,7 @@ def visualize_test_sessions(
     output_dir=None,
     checkpoint=None,
     image_size=None,
+    canvas_shape=None,
     device="cuda",
     num_sessions=6,
     session_indices=None,
@@ -140,14 +122,20 @@ def visualize_test_sessions(
     print(f"Device    : {device}")
     print("=" * 60)
 
+    config_path = model_dir / "config.json"
+    if config_path.is_file():
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        if image_size is None:
+            sz = cfg.get("image_size")
+            image_size = tuple(sz) if sz else None
+        if canvas_shape is None and cfg.get("canvas_shape"):
+            canvas_shape = tuple(cfg["canvas_shape"])
+
     model = VxmDense.load(ckpt_path, device)
     model.eval()
-
-    config_path = model_dir / "config.json"
-    if config_path.is_file() and image_size is None:
-        cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        sz = cfg.get("image_size")
-        image_size = tuple(sz) if sz else None
+    if canvas_shape is None:
+        canvas_shape = tuple(int(x) for x in model.config["inshape"])
+    print(f"Canvas (padded): {canvas_shape[1]}x{canvas_shape[0]} (WxH)")
 
     if test_folders is None:
         test_folders = _load_test_folders(model_dir)
@@ -168,7 +156,8 @@ def visualize_test_sessions(
         run_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n[{si}/{len(chosen)}] {folder}")
 
-        bands_eq, bands_raw, band_files, wavelengths = _load_stack(folder, image_size)
+        bands_eq, bands_raw, band_files = load_session_bands(folder, image_size=image_size)
+        wavelengths = [Path(p).stem for p in band_files]
         bands_raw_after, chain_steps = register_stack_with_voxelmorph_chain(
             model,
             bands_eq,
@@ -176,6 +165,7 @@ def visualize_test_sessions(
             device=device,
             descending=descending,
             smooth_flow_sigma=smooth_flow_sigma,
+            canvas_shape=canvas_shape,
         )
 
         save_session_registration_outputs(

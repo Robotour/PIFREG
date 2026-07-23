@@ -12,6 +12,8 @@ description: >-
 
 **Default image size: native resolution** (no resize). Pass `--image-size W H` only when you explicitly want down/up-sampling.
 
+**Automatic padding:** VoxelMorph U-Net requires height/width divisible by 16. At native resolution the pipeline scans all sessions for max (H, W), pads each band with **black borders on the bottom/right** to a shared canvas (e.g. 848×848), runs the model on the canvas, **crops displacement fields back to each band's native size**, and warps **unpadded raw** images. Metrics and saved band JPEGs stay at native resolution.
+
 **Default preprocessing: per-band histogram equalization** for registration optimization only.
 Displacement / global transforms are always applied to **raw grayscale at native resolution** (`bands_raw`), not to hist-eq images.
 Chain methods refresh hist-eq from warped raw before the next pairwise step.

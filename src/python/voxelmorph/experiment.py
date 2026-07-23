@@ -53,10 +53,13 @@ def prepare_data_split(
     seed: int = 42,
     image_size=None,
 ) -> Dict[str, Any]:
+    from src.python.preprocessing.image_pad import resolve_voxelmorph_canvas
+
     folders = discover_band_folders([data_root])
     train_folders, test_folders = split_folders_train_test(
         folders, train_ratio=train_ratio, seed=seed,
     )
+    canvas_shape = resolve_voxelmorph_canvas(folders, image_size=image_size)
     save_split_manifest(
         run_dir / 'split_manifest.json',
         train_folders,
@@ -64,15 +67,20 @@ def prepare_data_split(
         train_ratio,
         seed,
     )
-    train_pairs = build_adjacent_band_pairs(train_folders, image_size=image_size)
-    test_pairs = build_adjacent_band_pairs(test_folders, image_size=image_size)
+    train_pairs = build_adjacent_band_pairs(
+        train_folders, image_size=image_size, canvas_shape=canvas_shape,
+    )
+    test_pairs = build_adjacent_band_pairs(
+        test_folders, image_size=image_size, canvas_shape=canvas_shape,
+    )
     return {
         'folders': folders,
         'train_folders': train_folders,
         'test_folders': test_folders,
         'train_pairs': train_pairs,
         'test_pairs': test_pairs,
-        'inshape': train_pairs[0][0].shape,
+        'inshape': canvas_shape,
+        'canvas_shape': canvas_shape,
     }
 
 
@@ -125,6 +133,7 @@ def evaluate_run(
     checkpoint: Path,
     device: str = 'cuda',
     image_size=None,
+    canvas_shape=None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
     method_name: str = 'voxelmorph',
@@ -133,6 +142,9 @@ def evaluate_run(
     from .training import register_stack_with_voxelmorph_chain
 
     model = VxmDense.load(str(checkpoint), device)
+    canvas_shape = canvas_shape or data_bundle.get('canvas_shape') or tuple(
+        int(x) for x in model.config['inshape']
+    )
 
     def _register_fn(bands_eq, bands_raw):
         registered_raw, _ = register_stack_with_voxelmorph_chain(
@@ -142,6 +154,7 @@ def evaluate_run(
             device=device,
             descending=chain_descending,
             smooth_flow_sigma=smooth_flow_sigma,
+            canvas_shape=canvas_shape,
         )
         return registered_raw
 
@@ -156,7 +169,7 @@ def evaluate_run(
         model,
         data_bundle['test_folders'],
         device=device,
-        image_size=image_size,
+        canvas_shape=canvas_shape,
         descending=chain_descending,
         smooth_flow_sigma=smooth_flow_sigma,
         max_sessions=None,
@@ -171,6 +184,7 @@ def evaluate_run(
     )
     payload = {
         'checkpoint': str(checkpoint.resolve()),
+        'canvas_shape': list(canvas_shape),
         'pair_eval': pair_result,
         'stack_eval': stack_result,
         'all_pairs_eval': all_pairs_eval,
@@ -188,6 +202,7 @@ def visualize_all_test_sessions(
     project_root: Path,
     device: str = 'cuda',
     image_size=None,
+    canvas_shape=None,
     spectral_path: Optional[Path] = None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
@@ -196,11 +211,13 @@ def visualize_all_test_sessions(
 
     viz_dir = Path(run_dir) / 'visualizations'
     spectral_path = spectral_path or (project_root / 'HSI2RGB20240517.xlsx')
+    canvas_shape = canvas_shape or data_bundle.get('canvas_shape')
     visualize_test_sessions(
         run_dir=run_dir,
         output_dir=viz_dir,
         checkpoint=str(checkpoint),
         image_size=image_size,
+        canvas_shape=canvas_shape,
         device=device,
         all_test_sessions=True,
         test_folders=data_bundle['test_folders'],
@@ -235,6 +252,12 @@ def run_full_experiment(
     data_bundle = prepare_data_split(
         data_root, run_dir, train_ratio=train_ratio, seed=seed, image_size=image_size,
     )
+    canvas = data_bundle['canvas_shape']
+    print(
+        f'VoxelMorph canvas: {canvas[1]}x{canvas[0]} (WxH), '
+        f'zero-padded to divisor 16 for U-Net',
+        flush=True,
+    )
 
     config = {
         'method': method,
@@ -245,6 +268,7 @@ def run_full_experiment(
         'train_ratio': train_ratio,
         'seed': seed,
         'image_size': list(image_size) if image_size is not None else None,
+        'canvas_shape': list(data_bundle['canvas_shape']),
         'chain_descending': chain_descending,
         'smooth_flow_sigma': smooth_flow_sigma,
         'num_sessions': len(data_bundle['folders']),
@@ -283,6 +307,7 @@ def run_full_experiment(
         best_path,
         device=train_kwargs.get('device', 'cuda'),
         image_size=image_size,
+        canvas_shape=data_bundle.get('canvas_shape'),
         chain_descending=chain_descending,
         smooth_flow_sigma=smooth_flow_sigma,
         method_name=csv_method_name,
@@ -332,6 +357,7 @@ def run_full_experiment(
         project_root,
         device=train_kwargs.get('device', 'cuda'),
         image_size=image_size,
+        canvas_shape=data_bundle.get('canvas_shape'),
         chain_descending=chain_descending,
         smooth_flow_sigma=smooth_flow_sigma,
     )
