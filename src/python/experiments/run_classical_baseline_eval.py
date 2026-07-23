@@ -326,7 +326,8 @@ def main():
         'epochs': args.elastix_epochs,
         'spacinginvoxels': args.elastix_spacing,
         'transform_type': args.stackreg_transform,
-        'verbose': args.elastix_verbose,
+        # Named elastix_verbose so it does not collide with evaluate_*(verbose=...)
+        'elastix_verbose': args.elastix_verbose,
     }
 
     metrics_csv = None

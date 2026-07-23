@@ -126,7 +126,7 @@ def register_stack_classical(
             bands,
             epochs=kwargs.get('epochs', 80),
             spacinginvoxels=kwargs.get('spacinginvoxels', 20),
-            verbose=kwargs.get('verbose', 0),
+            verbose=kwargs.get('elastix_verbose', kwargs.get('verbose', 0)),
         )
     if method == 'elastix_chain':
         return register_stack_elastix_chain(
