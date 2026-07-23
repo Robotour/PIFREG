@@ -105,6 +105,42 @@ def register_elastix_groupwise(img_list, epochs=100, spacinginvoxels=20, verbose
     return registered_list, fields
 
 
+def _chain_pair_indices(n, descending=True):
+    """Return (fixed_idx, moving_idx) pairs for wavelength chain registration."""
+    if descending:
+        return [(i + 1, i) for i in range(n - 2, -1, -1)]
+    return [(i - 1, i) for i in range(1, n)]
+
+
+def register_elastix_chain(img_list, epochs=20, spacinginvoxels=20, descending=True):
+    """
+    Elastix 链式 pairwise 配准（与 VoxelMorph 推理链一致）
+
+    从锚点波段（默认最长波长）出发，逐对相邻波段做 Elastix B-spline 配准。
+    约 N-1 次 Elastix，比 groupwise 慢，但推理图与 DL chain 可直接对比。
+
+    参数:
+        img_list: 波段图像列表，每个元素 (H, W)，建议按波长升序
+        epochs: 每对 Elastix 最大迭代次数
+        spacinginvoxels: B 样条网格间距
+        descending: True 时锚点为最后一波段（长波），向短波链式配准
+
+    返回:
+        registered_list: 配准后的图像列表，长度与 img_list 相同
+    """
+    registered = [np.asarray(b, dtype=np.float32).copy() for b in img_list]
+    if len(registered) < 2:
+        return registered
+    for fixed_idx, moving_idx in _chain_pair_indices(len(registered), descending=descending):
+        registered[moving_idx] = register_elastix(
+            registered[fixed_idx],
+            registered[moving_idx],
+            epochs=epochs,
+            spacinginvoxels=spacinginvoxels,
+        )
+    return registered
+
+
 def register_elastix_edge(fixed_image, moving_image, epochs=20, spacinginvoxels=20):
     """
     Elastix + 边缘检测配准方法

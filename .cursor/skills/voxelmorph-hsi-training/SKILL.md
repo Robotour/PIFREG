@@ -10,6 +10,34 @@ description: >-
 
 # VoxelMorph HSI Training Workflow
 
+**Default image size: 512×512** (do not downsample to 256 unless debugging).
+
+## Metrics comparison CSV (one file per random seed)
+
+Path: `outputs/metrics_tables/seed_{seed}.csv`
+
+| Row | method | stage | Meaning |
+|-----|--------|-------|---------|
+| 1 | `unregistered` | `before` | Test set, all C(N,2) band-pair metrics averaged |
+| 2+ | `stackreg_chain`, `voxelmorph_baseline`, … | `after` | After registration, same metric definition |
+
+Metrics per row: **MI, NMI, NCC, NTG, MSE** — for each session, compute every unordered band pair (≈435 pairs for 30 bands), average; then average over test sessions.
+
+```bash
+# Row 1 only (unregistered baseline)
+python src/python/experiments/run_append_metrics_csv.py \
+  --init-only --seed 42 --data-dir data/cut_images_all
+
+# Classical / VoxelMorph eval scripts append rows automatically (default CSV path)
+# Manual append from an existing run:
+python src/python/experiments/run_append_metrics_csv.py \
+  --method voxelmorph_stack_spatial \
+  --from-run-dir outputs/voxelmorph_runs/stack_spatial/stack_spatial_v1_YYYYMMDD_HHMMSS \
+  --seed 42 --overwrite
+```
+
+Code: `src/python/experiments/stack_pairwise_metrics.py`, `metrics_csv.py`
+
 ## Methods (separate functions)
 
 | `--method` | Python function | Description |
@@ -107,14 +135,74 @@ python src/python/experiments/train_voxelmorph.py \
 1. Run baseline and stack_spatial with different `--exp-name` (auto timestamp subfolder).
 2. Compare `test_metrics.json` → `stack_eval.summary` (primary for RGB quality).
 3. Compare `visualizations/*/rgb_overview.png` side by side.
+4. Run classical baselines on the **same test split** (see below).
+
+## Classical baselines on test set (Elastix / StackReg / KEREN)
+
+Script: `src/python/experiments/run_classical_baseline_eval.py`  
+Code: `src/python/registration/classical_stack.py`
+
+| `--method` | Description |
+|------------|-------------|
+| `elastix_groupwise` | Full-stack Elastix BSplineStackTransform |
+| `elastix_chain` | Pairwise Elastix along wavelength chain (like VoxelMorph inference) |
+| `stackreg_chain` | Pairwise StackReg bilinear chain |
+| `keren` | KEREN pyramid LK (translation + rotation) |
+| `all` | Run all four sequentially |
+
+Output: `outputs/classical_baselines/{method}/{exp_name}_{timestamp}/test_metrics.json`
+
+**Fair comparison**: reuse VoxelMorph split via `--split-from-run-dir`.
+
+```bash
+# StackReg (fast sanity check)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method stackreg_chain \
+  --exp-name stackreg_v1 \
+  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
+  --visualize
+
+# KEREN
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method keren \
+  --exp-name keren_v1 \
+  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
+
+# Elastix chain — pairwise chain, same graph as VoxelMorph (very slow; needs elastix.exe)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method elastix_chain \
+  --exp-name elastix_chain_v1 \
+  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
+  --elastix-epochs 20 \
+  --visualize
+
+# Elastix groupwise (slow; needs elastix.exe)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method elastix_groupwise \
+  --exp-name elastix_gw_v1 \
+  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
+  --elastix-epochs 80
+
+# All classical methods
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method all \
+  --exp-name classical_compare_v1 \
+  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
+```
+
+Debug with fewer sessions: `--max-sessions 5`
+
+Compare metrics: `test_metrics.json` → `stack_eval.summary.NCC_after_mean` (same field as VoxelMorph).
 
 ## Key scripts
 
 | File | Role |
 |------|------|
-| `src/python/experiments/train_voxelmorph.py` | CLI entry |
+| `src/python/experiments/train_voxelmorph.py` | VoxelMorph CLI entry |
+| `src/python/experiments/run_classical_baseline_eval.py` | Classical baseline test eval |
 | `src/python/voxelmorph/experiment.py` | Run dir + full pipeline |
 | `src/python/voxelmorph/training.py` | `train_voxelmorph_baseline`, `train_voxelmorph_stack_spatial` |
+| `src/python/registration/classical_stack.py` | Whole-stack Elastix/StackReg/KEREN |
 | `src/python/experiments/visualize_voxelmorph_test.py` | Fake RGB visualization |
 
 ## Environment

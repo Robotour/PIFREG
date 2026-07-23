@@ -50,7 +50,7 @@ def prepare_data_split(
     run_dir: Path,
     train_ratio: float = 0.7,
     seed: int = 42,
-    image_size=(256, 256),
+    image_size=(512, 512),
 ) -> Dict[str, Any]:
     folders = discover_band_folders([data_root])
     train_folders, test_folders = split_folders_train_test(
@@ -123,11 +123,26 @@ def evaluate_run(
     data_bundle: Dict[str, Any],
     checkpoint: Path,
     device: str = 'cuda',
-    image_size=(256, 256),
+    image_size=(512, 512),
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
+    method_name: str = 'voxelmorph',
 ) -> Dict[str, Any]:
+    from src.python.experiments.stack_pairwise_metrics import evaluate_test_sessions_all_pairs
+    from .training import register_stack_with_voxelmorph_chain
+
     model = VxmDense.load(str(checkpoint), device)
+
+    def _register_fn(bands):
+        registered, _ = register_stack_with_voxelmorph_chain(
+            model,
+            bands,
+            device=device,
+            descending=chain_descending,
+            smooth_flow_sigma=smooth_flow_sigma,
+        )
+        return registered
+
     pair_result = evaluate_voxelmorph_pairs(
         model,
         data_bundle['test_pairs'],
@@ -145,10 +160,19 @@ def evaluate_run(
         max_sessions=None,
         verbose=True,
     )
+    all_pairs_eval = evaluate_test_sessions_all_pairs(
+        data_bundle['test_folders'],
+        image_size=image_size,
+        register_fn=_register_fn,
+        max_sessions=None,
+        verbose=True,
+    )
     payload = {
         'checkpoint': str(checkpoint.resolve()),
         'pair_eval': pair_result,
         'stack_eval': stack_result,
+        'all_pairs_eval': all_pairs_eval,
+        'method_name': method_name,
     }
     with open(run_dir / 'test_metrics.json', 'w', encoding='utf-8') as f:
         json.dump(payload, f, indent=2)
@@ -161,7 +185,7 @@ def visualize_all_test_sessions(
     data_bundle: Dict[str, Any],
     project_root: Path,
     device: str = 'cuda',
-    image_size=(256, 256),
+    image_size=(512, 512),
     spectral_path: Optional[Path] = None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
@@ -192,12 +216,15 @@ def run_full_experiment(
     data_dir: str = 'data/cut_images_all',
     train_ratio: float = 0.7,
     seed: int = 42,
-    image_size=(256, 256),
+    image_size=(512, 512),
     train_kwargs: Optional[Dict[str, Any]] = None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
     skip_train: bool = False,
     run_dir: Optional[Path] = None,
+    metrics_csv: Optional[Path] = None,
+    write_metrics_csv: bool = True,
+    overwrite_csv_row: bool = False,
 ) -> Tuple[Path, Dict[str, Any]]:
     """Train -> save best.pt -> eval all test -> visualize all test sessions."""
     train_kwargs = dict(train_kwargs or {})
@@ -235,6 +262,7 @@ def run_full_experiment(
         _, best_path, best_info = train_method(method, run_dir, data_bundle, train_kwargs)
 
     best_path = Path(best_path)
+    csv_method_name = f'voxelmorph_{method}'
     metrics = evaluate_run(
         run_dir,
         data_bundle,
@@ -243,7 +271,40 @@ def run_full_experiment(
         image_size=image_size,
         chain_descending=chain_descending,
         smooth_flow_sigma=smooth_flow_sigma,
+        method_name=csv_method_name,
     )
+    if write_metrics_csv:
+        from src.python.experiments.metrics_csv import (
+            append_method_row,
+            default_metrics_csv_path,
+            ensure_unregistered_row,
+        )
+        csv_path = metrics_csv or default_metrics_csv_path(project_root, seed)
+        ensure_unregistered_row(
+            csv_path,
+            seed,
+            data_bundle['test_folders'],
+            image_size=image_size,
+            verbose=True,
+        )
+        all_pairs = metrics['all_pairs_eval']
+        append_method_row(
+            csv_path,
+            method=csv_method_name,
+            seed=seed,
+            summary_after=all_pairs['summary_after'],
+            test_folders=data_bundle['test_folders'],
+            image_size=image_size,
+            run_dir=run_dir,
+            notes='all C(N,2) band pairs mean; VoxelMorph chain inference',
+            num_bands_mean=all_pairs.get('num_bands_mean'),
+            num_pairs_mean=all_pairs.get('num_pairs_mean'),
+            overwrite=overwrite_csv_row,
+            verbose=True,
+        )
+        config['metrics_csv'] = str(csv_path.resolve())
+        with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2)
     visualize_all_test_sessions(
         run_dir,
         best_path,

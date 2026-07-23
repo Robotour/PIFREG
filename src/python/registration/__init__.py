@@ -6,8 +6,14 @@ from .pif_groupwise_chain import register_pifreg_chain
 from .pif_groupwise_joint import register_pifreg_groupwise_joint
 from .pif_groupwise_sliding_window import register_pifreg_groupwise_sliding_window
 from .pif_groupwise_spatial_window import register_pifreg_groupwise_spatial_window
+from .classical_stack import (
+    CLASSICAL_METHODS,
+    evaluate_classical_sessions,
+    register_stack_classical,
+)
 from .methods import (
     register_elastix,
+    register_elastix_chain,
     register_elastix_groupwise,
     register_elastix_edge,
     register_elastix_histogram,
@@ -26,11 +32,15 @@ __all__ = [
     'register_pifreg_groupwise_spatial_window',
     'register_voxelmorph',
     'register_elastix',
+    'register_elastix_chain',
     'register_elastix_groupwise',
     'register_elastix_edge',
     'register_elastix_histogram',
     'register_stackreg',
     'register_keren',
+    'CLASSICAL_METHODS',
+    'evaluate_classical_sessions',
+    'register_stack_classical',
     'METHOD_NAME',
     'METHOD_FULL_NAME',
 ]
