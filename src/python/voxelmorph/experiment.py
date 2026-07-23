@@ -114,7 +114,6 @@ def train_method(
             edge_gain=train_kwargs.get('edge_gain', 1.0),
             chain_descending=train_kwargs.get('chain_descending', True),
             val_session_steps=train_kwargs.get('val_session_steps', 15),
-            image_loss=train_kwargs.get('image_loss', 'mse'),
         )
     raise ValueError(f'Unknown method: {method}. Use baseline or stack_spatial.')
 
