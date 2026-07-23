@@ -38,7 +38,14 @@ def parse_args():
     p.add_argument('--data-dir', default='data/cut_images_all')
     p.add_argument('--train-ratio', type=float, default=0.7)
     p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--image-size', type=int, nargs=2, default=[512, 512], metavar=('W', 'H'))
+    p.add_argument(
+        '--image-size',
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=('W', 'H'),
+        help='Optional resize; default: native resolution (no resize)',
+    )
     p.add_argument('--epochs', type=int, default=300)
     p.add_argument('--steps-per-epoch', type=int, default=80)
     p.add_argument('--val-steps', type=int, default=100, help='Baseline: random val pairs')
@@ -103,7 +110,7 @@ def main():
         data_dir=args.data_dir,
         train_ratio=args.train_ratio,
         seed=args.seed,
-        image_size=tuple(args.image_size),
+        image_size=tuple(args.image_size) if args.image_size else None,
         train_kwargs=train_kwargs,
         chain_descending=not args.ascending_chain,
         smooth_flow_sigma=args.smooth_flow_sigma,
@@ -114,16 +121,19 @@ def main():
         overwrite_csv_row=args.overwrite_csv_row,
     )
 
+    from src.python.experiments.metrics_csv import default_metrics_csv_path
+
     print('\n' + '=' * 60)
     print('Experiment complete')
-    print(f'  run_dir         : {run_dir}')
-    print(f'  best checkpoint : {summary["best_checkpoint"]}')
-    print(f'  visualizations  : {run_dir / "visualizations"}')
-    print(f'  test_metrics    : {run_dir / "test_metrics.json"}')
+    print(f'  run_dir              : {run_dir}')
+    print(f'  best checkpoint      : {summary["best_checkpoint"]}')
+    print(f'  visualizations       : {run_dir / "visualizations"}')
+    print(f'    (bands/flows/RGB)  : {run_dir / "visualizations" / "01_*"}')
+    print(f'  test_metrics         : {run_dir / "test_metrics.json"}')
+    print(f'  unregistered report  : {PROJECT_ROOT / "outputs" / "metrics_tables" / f"seed_{args.seed}_unregistered.json"}')
     if not args.no_metrics_csv:
-        from src.python.experiments.metrics_csv import default_metrics_csv_path
         csv_path = metrics_csv or default_metrics_csv_path(PROJECT_ROOT, args.seed)
-        print(f'  metrics_csv     : {csv_path}')
+        print(f'  metrics_csv          : {csv_path}')
     print('=' * 60)
 
 

@@ -3,22 +3,29 @@ name: voxelmorph-hsi-training
 description: >-
   Train and evaluate unsupervised VoxelMorph on HSI tongue stacks (cut_images_all).
   Supports baseline pairwise vs stack_spatial method, isolated run folders, best.pt
-  checkpoint, full test eval and RGB visualization. Use when the user asks to train
-  VoxelMorph, compare registration methods, run voxelmorph experiments on Linux
-  workstation, or visualize test-set fake RGB after training.
+  checkpoint, full test eval, per-band/flow exports, and RGB visualization. Use when
+  the user asks to train VoxelMorph, compare registration methods, run voxelmorph
+  experiments on Linux workstation, or visualize test-set fake RGB after training.
 ---
 
 # VoxelMorph HSI Training Workflow
 
-**Default image size: 512×512** (do not downsample to 256 unless debugging).
+**Default image size: native resolution** (no resize). Pass `--image-size W H` only when you explicitly want down/up-sampling.
 
 **Default preprocessing: per-band histogram equalization** for registration optimization only.
-Displacement / global transforms are always applied to **raw resized grayscale** (`bands_raw`), not to hist-eq images.
+Displacement / global transforms are always applied to **raw grayscale at native resolution** (`bands_raw`), not to hist-eq images.
 Chain methods refresh hist-eq from warped raw before the next pairwise step.
 
 Utility: `src/python/preprocessing/band_preprocess.py` (`histogram_equalize_band`, `refresh_histogram_equalized`).
 
-## Metrics comparison CSV (one file per random seed)
+## Environment
+
+```bash
+conda activate dxtorch
+cd /path/to/24_hyper_registration
+```
+
+## Metrics comparison CSV + unregistered baseline
 
 Path: `outputs/metrics_tables/seed_{seed}.csv`
 
@@ -29,20 +36,49 @@ Path: `outputs/metrics_tables/seed_{seed}.csv`
 
 Metrics per row: **MI, NMI, NCC, NTG, MSE** — for each session, compute every unordered band pair (≈435 pairs for 30 bands), average; then average over test sessions.
 
-```bash
-# Row 1 only (unregistered baseline)
-python src/python/experiments/run_append_metrics_csv.py \
-  --init-only --seed 42 --data-dir data/cut_images_all
+**Unregistered JSON report** (written automatically when running eval scripts):
 
-# Classical / VoxelMorph eval scripts append rows automatically (default CSV path)
-# Manual append from an existing run:
-python src/python/experiments/run_append_metrics_csv.py \
-  --method voxelmorph_stack_spatial \
-  --from-run-dir outputs/voxelmorph_runs/stack_spatial/stack_spatial_v1_YYYYMMDD_HHMMSS \
-  --seed 42 --overwrite
+```
+outputs/metrics_tables/seed_{seed}_unregistered.json
 ```
 
-Code: `src/python/experiments/stack_pairwise_metrics.py`, `metrics_csv.py`
+Both VoxelMorph and classical eval scripts print `Before (unregistered)` / `After (registered)` / `Delta` to the terminal.
+
+```bash
+# Row 1 only (unregistered baseline, optional standalone init)
+python src/python/experiments/run_append_metrics_csv.py \
+  --init-only --seed 42 --data-dir data/cut_images_all
+```
+
+Code: `src/python/experiments/stack_pairwise_metrics.py`, `metrics_csv.py`, `session_outputs.py`
+
+## Per-session exports (bands + displacement fields)
+
+Each test session saves **raw grayscale bands before/after** and **flow visualizations**:
+
+```
+# VoxelMorph (under visualizations/)
+visualizations/01_{session}/
+  bands/before/{wavelength}.jpeg
+  bands/after/{wavelength}.jpeg
+  flows/flow_stack.npy
+  flows/color/{wavelength}_flow.png
+  flows/magnitude/{wavelength}_magnitude.png
+  session_outputs.json
+  rgb_overview.png
+  images/rgb_*.png
+
+# Classical (under session_exports/)
+session_exports/01_{session}/
+  bands/before/*.jpeg
+  bands/after/*.jpeg
+  flows/...          # dense flow (Elastix / StackReg chain / VoxelMorph-style)
+  transforms.json    # StackReg / KEREN (rigid, no dense flow)
+  session_outputs.json
+```
+
+Classical: `--save-outputs` is **on by default**; use `--no-save-outputs` to skip.
+VoxelMorph: bands/flows saved automatically during `train_voxelmorph.py` pipeline and `visualize_voxelmorph_test.py`.
 
 ## Methods (separate functions)
 
@@ -55,30 +91,31 @@ Code: `src/python/voxelmorph/training.py`
 
 ## Run directory layout
 
-Each experiment gets its own folder (never overwrite prior runs):
-
 ```
 outputs/voxelmorph_runs/{method}/{exp_name}_{timestamp}/
   config.json
   split_manifest.json
   train_history.json
   best_info.json
-  test_metrics.json
+  test_metrics.json          # includes all_pairs_eval summary_before/after
   run_summary.json
-  checkpoints/
-    best.pt      # best validation epoch — use this for eval/viz
-    final.pt
-    0020.pt ...
-  visualizations/
-    01_{session}/rgb_overview.png
-    index.json
+  checkpoints/best.pt
+  visualizations/01_{session}/bands|flows|rgb_*
+  visualizations/index.json
 ```
 
-## One-command pipeline (train + eval + visualize all test sessions)
+## Recommended command sequence (fair comparison)
 
-From repo root on Linux:
+Replace `YYYYMMDD_HHMMSS` with your actual run folder timestamp.
 
-### Baseline (comparison)
+### Step 0 — optional: init CSV row 1 only
+
+```bash
+python src/python/experiments/run_append_metrics_csv.py \
+  --init-only --seed 42 --data-dir data/cut_images_all
+```
+
+### Step 1 — VoxelMorph baseline (train + eval + bands/flows/RGB)
 
 ```bash
 python src/python/experiments/train_voxelmorph.py \
@@ -86,6 +123,7 @@ python src/python/experiments/train_voxelmorph.py \
   --exp-name baseline_v1 \
   --data-dir data/cut_images_all \
   --train-ratio 0.7 \
+  --seed 42 \
   --epochs 1000 \
   --steps-per-epoch 80 \
   --val-interval 20 \
@@ -93,7 +131,12 @@ python src/python/experiments/train_voxelmorph.py \
   --device cuda
 ```
 
-### Proposed method (stack + spatial weights)
+Outputs:
+- `outputs/metrics_tables/seed_42_unregistered.json` (before metrics)
+- `outputs/metrics_tables/seed_42.csv` (row 1 unregistered + row voxelmorph_baseline)
+- `outputs/voxelmorph_runs/baseline/baseline_v1_*/visualizations/*/bands|flows`
+
+### Step 2 — VoxelMorph stack_spatial (your method)
 
 ```bash
 python src/python/experiments/train_voxelmorph.py \
@@ -101,6 +144,7 @@ python src/python/experiments/train_voxelmorph.py \
   --exp-name stack_spatial_v1 \
   --data-dir data/cut_images_all \
   --train-ratio 0.7 \
+  --seed 42 \
   --epochs 1000 \
   --steps-per-epoch 80 \
   --val-interval 20 \
@@ -110,7 +154,58 @@ python src/python/experiments/train_voxelmorph.py \
   --device cuda
 ```
 
-## Re-visualize an existing run (best.pt)
+### Step 3 — Classical baselines (same test split as Step 1)
+
+```bash
+VM_RUN=outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
+
+# StackReg chain (fast sanity check)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method stackreg_chain \
+  --exp-name stackreg_v1 \
+  --split-from-run-dir "$VM_RUN" \
+  --seed 42 \
+  --visualize
+
+# KEREN
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method keren \
+  --exp-name keren_v1 \
+  --split-from-run-dir "$VM_RUN" \
+  --seed 42
+
+# Elastix pairwise chain (slow; needs elastix.exe)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method elastix_chain \
+  --exp-name elastix_chain_v1 \
+  --split-from-run-dir "$VM_RUN" \
+  --elastix-epochs 20 \
+  --visualize
+
+# Elastix groupwise (slow)
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method elastix_groupwise \
+  --exp-name elastix_gw_v1 \
+  --split-from-run-dir "$VM_RUN" \
+  --elastix-epochs 80
+
+# All four classical methods in one go
+python src/python/experiments/run_classical_baseline_eval.py \
+  --method all \
+  --exp-name classical_compare_v1 \
+  --split-from-run-dir "$VM_RUN" \
+  --seed 42
+```
+
+Classical outputs:
+- `outputs/classical_baselines/{method}/{exp_name}_*/session_exports/*/bands|flows`
+- Terminal prints before/after/delta; appends row to `seed_42.csv`
+
+Debug with fewer sessions: `--max-sessions 5`
+
+Skip band/flow export: `--no-save-outputs`
+
+### Step 4 — Re-export VoxelMorph test viz (optional, from existing run)
 
 ```bash
 python src/python/experiments/visualize_voxelmorph_test.py \
@@ -119,15 +214,19 @@ python src/python/experiments/visualize_voxelmorph_test.py \
   --device cuda
 ```
 
-## Eval-only (skip training)
+### Eval-only (skip training, re-run metrics + viz)
 
 ```bash
 python src/python/experiments/train_voxelmorph.py \
   --method baseline \
   --exp-name baseline_v1 \
   --eval-only \
-  --run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
+  --run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
+  --seed 42 \
+  --device cuda
 ```
+
+Skip CSV: add `--no-metrics-csv`
 
 ## Validation metrics
 
@@ -136,87 +235,17 @@ python src/python/experiments/train_voxelmorph.py \
 | baseline | pairwise `NCC_after` | `checkpoints/best.pt` |
 | stack_spatial | stack chain `NCC_after_mean` | `checkpoints/best.pt` |
 
-## Comparing experiments
-
-1. Run baseline and stack_spatial with different `--exp-name` (auto timestamp subfolder).
-2. Compare `test_metrics.json` → `stack_eval.summary` (primary for RGB quality).
-3. Compare `visualizations/*/rgb_overview.png` side by side.
-4. Run classical baselines on the **same test split** (see below).
-
-## Classical baselines on test set (Elastix / StackReg / KEREN)
-
-Script: `src/python/experiments/run_classical_baseline_eval.py`  
-Code: `src/python/registration/classical_stack.py`
-
-| `--method` | Description |
-|------------|-------------|
-| `elastix_groupwise` | Full-stack Elastix BSplineStackTransform |
-| `elastix_chain` | Pairwise Elastix along wavelength chain (like VoxelMorph inference) |
-| `stackreg_chain` | Pairwise StackReg bilinear chain |
-| `keren` | KEREN pyramid LK (translation + rotation) |
-| `all` | Run all four sequentially |
-
-Output: `outputs/classical_baselines/{method}/{exp_name}_{timestamp}/test_metrics.json`
-
-**Fair comparison**: reuse VoxelMorph split via `--split-from-run-dir`.
-
-```bash
-# StackReg (fast sanity check)
-python src/python/experiments/run_classical_baseline_eval.py \
-  --method stackreg_chain \
-  --exp-name stackreg_v1 \
-  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
-  --visualize
-
-# KEREN
-python src/python/experiments/run_classical_baseline_eval.py \
-  --method keren \
-  --exp-name keren_v1 \
-  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
-
-# Elastix chain — pairwise chain, same graph as VoxelMorph (very slow; needs elastix.exe)
-python src/python/experiments/run_classical_baseline_eval.py \
-  --method elastix_chain \
-  --exp-name elastix_chain_v1 \
-  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
-  --elastix-epochs 20 \
-  --visualize
-
-# Elastix groupwise (slow; needs elastix.exe)
-python src/python/experiments/run_classical_baseline_eval.py \
-  --method elastix_groupwise \
-  --exp-name elastix_gw_v1 \
-  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS \
-  --elastix-epochs 80
-
-# All classical methods
-python src/python/experiments/run_classical_baseline_eval.py \
-  --method all \
-  --exp-name classical_compare_v1 \
-  --split-from-run-dir outputs/voxelmorph_runs/baseline/baseline_v1_YYYYMMDD_HHMMSS
-```
-
-Debug with fewer sessions: `--max-sessions 5`
-
-Compare metrics: `test_metrics.json` → `stack_eval.summary.NCC_after_mean` (same field as VoxelMorph).
-
 ## Key scripts
 
 | File | Role |
 |------|------|
 | `src/python/experiments/train_voxelmorph.py` | VoxelMorph CLI entry |
-| `src/python/experiments/run_classical_baseline_eval.py` | Classical baseline test eval |
+| `src/python/experiments/run_classical_baseline_eval.py` | Classical baseline test eval + exports |
+| `src/python/experiments/session_outputs.py` | Save bands/flows per session |
 | `src/python/voxelmorph/experiment.py` | Run dir + full pipeline |
 | `src/python/voxelmorph/training.py` | `train_voxelmorph_baseline`, `train_voxelmorph_stack_spatial` |
 | `src/python/registration/classical_stack.py` | Whole-stack Elastix/StackReg/KEREN |
-| `src/python/experiments/visualize_voxelmorph_test.py` | Fake RGB visualization |
-
-## Environment
-
-```bash
-conda activate dxtorch   # or any env with torch, cv2, scipy
-cd /path/to/24_hyper_registration
-```
+| `src/python/experiments/visualize_voxelmorph_test.py` | Fake RGB + bands/flows on test set |
 
 ## Agent checklist
 
@@ -224,6 +253,8 @@ When user changes hyperparameters:
 
 - [ ] Use new `--exp-name` (timestamp folder is automatic)
 - [ ] Keep `--method baseline` vs `stack_spatial` explicit for fair comparison
+- [ ] Use same `--seed` and `--split-from-run-dir` for classical vs DL
 - [ ] After training, confirm `checkpoints/best.pt` exists
-- [ ] Confirm `visualizations/` contains all test sessions when pipeline finished
-- [ ] Report `test_metrics.json` stack_eval NCC before/after
+- [ ] Confirm `visualizations/*/bands/` and `flows/` exist
+- [ ] Report `test_metrics.json` → `all_pairs_eval.summary_before/after`
+- [ ] Confirm `outputs/metrics_tables/seed_{seed}_unregistered.json` exists

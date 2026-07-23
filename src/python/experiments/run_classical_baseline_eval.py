@@ -48,12 +48,15 @@ from src.python.experiments.metrics_csv import (
     append_method_row,
     default_metrics_csv_path,
     ensure_unregistered_row,
+    save_unregistered_metrics_report,
 )
+from src.python.experiments.session_outputs import print_metrics_summary, save_session_registration_outputs
 from src.python.preprocessing import hsi_to_rgb
 from src.python.registration.classical_stack import (
     CLASSICAL_METHODS,
+    anchor_index,
     evaluate_classical_sessions,
-    register_stack_classical,
+    register_stack_classical_detailed,
 )
 from src.python.voxelmorph.training import (
     discover_band_folders,
@@ -69,6 +72,7 @@ def create_run_dir(method: str, exp_name: str) -> Path:
     run_dir = PROJECT_ROOT / 'outputs' / 'classical_baselines' / method / f'{exp_name}_{ts}'
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / 'visualizations').mkdir(exist_ok=True)
+    (run_dir / 'session_exports').mkdir(exist_ok=True)
     return run_dir
 
 
@@ -94,6 +98,69 @@ def load_or_build_split(
     return train_folders, test_folders, None
 
 
+def export_test_sessions(
+    run_dir: Path,
+    method: str,
+    test_folders: list[Path],
+    image_size,
+    descending: bool,
+    spectral_path: Path,
+    register_kwargs: dict,
+    max_sessions: int | None = None,
+    save_rgb: bool = True,
+):
+    folders = list(test_folders)
+    if max_sessions is not None:
+        folders = folders[:max_sessions]
+
+    export_root = run_dir / 'session_exports'
+    viz_root = run_dir / 'visualizations'
+    index_rows = []
+    for si, folder in enumerate(folders, start=1):
+        slug = f'{si:02d}_{folder.name}'
+        out_dir = export_root / slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+        bands_eq, bands_raw, band_files = load_hsi_stack(folder, image_size=image_size)
+        detail = register_stack_classical_detailed(
+            method,
+            bands_eq,
+            bands_raw=bands_raw,
+            descending=descending,
+            **register_kwargs,
+        )
+        save_session_registration_outputs(
+            out_dir,
+            bands_raw,
+            detail['bands_raw_after'],
+            band_files,
+            chain_steps=detail.get('chain_steps'),
+            elastix_fields=detail.get('elastix_fields'),
+            transform_meta=detail.get('transform_meta'),
+            anchor_idx=anchor_index(len(band_files), descending=descending),
+            descending=descending,
+        )
+        print(f'  exported: {out_dir}', flush=True)
+
+        if save_rgb:
+            viz_dir = viz_root / slug
+            viz_dir.mkdir(parents=True, exist_ok=True)
+            rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
+            rgb_after = hsi_to_rgb(detail['bands_raw_after'], spectral_data_path=str(spectral_path))
+            rgb_paths = save_rgb_outputs(
+                viz_dir, rgb_before, rgb_after, title_after=f'{method} registered',
+            )
+            index_rows.append({
+                'session': str(folder),
+                'export_dir': str(out_dir),
+                'viz_dir': str(viz_dir),
+                **{k: str(v) for k, v in rgb_paths.items()},
+            })
+
+    if save_rgb and index_rows:
+        with open(viz_root / 'index.json', 'w', encoding='utf-8') as f:
+            json.dump(index_rows, f, indent=2)
+
+
 def visualize_sessions(
     run_dir: Path,
     method: str,
@@ -104,36 +171,11 @@ def visualize_sessions(
     register_kwargs: dict,
     max_sessions: int | None = None,
 ):
-    folders = list(test_folders)
-    if max_sessions is not None:
-        folders = folders[:max_sessions]
-
-    viz_root = run_dir / 'visualizations'
-    index_rows = []
-    for si, folder in enumerate(folders, start=1):
-        out_dir = viz_root / f'{si:02d}_{folder.name}'
-        out_dir.mkdir(parents=True, exist_ok=True)
-        bands_eq, bands_raw, _ = load_hsi_stack(folder, image_size=image_size)
-        bands_raw_after = register_stack_classical(
-            method,
-            bands_eq,
-            bands_raw=bands_raw,
-            descending=descending,
-            **register_kwargs,
-        )
-
-        rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
-        rgb_after = hsi_to_rgb(bands_raw_after, spectral_data_path=str(spectral_path))
-        paths = save_rgb_outputs(out_dir, rgb_before, rgb_after, title_after=f'{method} registered')
-        index_rows.append({
-            'session': str(folder),
-            'output_dir': str(out_dir),
-            **{k: str(v) for k, v in paths.items()},
-        })
-        print(f'  viz saved: {out_dir / "images" / "rgb_compare.png"}', flush=True)
-
-    with open(viz_root / 'index.json', 'w', encoding='utf-8') as f:
-        json.dump(index_rows, f, indent=2)
+    """Backward-compatible RGB-only wrapper."""
+    export_test_sessions(
+        run_dir, method, test_folders, image_size, descending,
+        spectral_path, register_kwargs, max_sessions=max_sessions, save_rgb=True,
+    )
 
 
 def run_one_method(
@@ -146,6 +188,7 @@ def run_one_method(
     max_sessions: int | None,
     register_kwargs: dict,
     visualize: bool,
+    save_outputs: bool,
     spectral_path: Path,
     split_manifest_src: Path | None,
     train_ratio: float,
@@ -176,7 +219,7 @@ def run_one_method(
     config = {
         'method': method,
         'exp_name': exp_name,
-        'image_size': list(image_size),
+        'image_size': list(image_size) if image_size else None,
         'descending_chain': descending,
         'max_sessions': max_sessions,
         'num_test_sessions': len(test_folders),
@@ -214,27 +257,14 @@ def run_one_method(
         json.dump(payload, f, indent=2)
 
     summary = stack_eval['summary_after']
-    print(
-        f'\nSummary  NCC {stack_eval["summary_before"]["NCC"]:.4f}'
-        f' -> {summary["NCC"]:.4f}  '
-        f'MSE {stack_eval["summary_before"]["MSE"]:.6f}'
-        f' -> {summary["MSE"]:.6f}',
-    )
+    print('\n--- Registration metrics on test set ---')
+    print_metrics_summary('Before (unregistered)', stack_eval['summary_before'])
+    print_metrics_summary('After  (registered)  ', summary)
+    print_metrics_summary('Delta (after-before) ', stack_eval['summary_delta'])
     print(f'Elapsed: {elapsed:.1f}s')
     print(f'Metrics: {run_dir / "test_metrics.json"}')
 
     if metrics_csv is not None:
-        eval_folders = list(test_folders)
-        if max_sessions is not None:
-            eval_folders = eval_folders[:max_sessions]
-        ensure_unregistered_row(
-            metrics_csv,
-            seed,
-            test_folders,
-            image_size=image_size,
-            max_sessions=max_sessions,
-            verbose=True,
-        )
         append_method_row(
             metrics_csv,
             method=method,
@@ -252,9 +282,9 @@ def run_one_method(
         )
         print(f'Metrics CSV: {metrics_csv}')
 
-    if visualize:
-        print('\nSaving visualizations ...')
-        visualize_sessions(
+    if save_outputs or visualize:
+        print('\nSaving per-session bands / flows / RGB ...')
+        export_test_sessions(
             run_dir,
             method,
             test_folders,
@@ -263,6 +293,7 @@ def run_one_method(
             spectral_path,
             register_kwargs,
             max_sessions=max_sessions,
+            save_rgb=visualize or save_outputs,
         )
 
     return run_dir
@@ -285,10 +316,21 @@ def parse_args():
         default=None,
         help='Reuse split_manifest.json from a VoxelMorph run (fair comparison)',
     )
-    p.add_argument('--image-size', type=int, nargs=2, default=[512, 512], metavar=('W', 'H'))
+    p.add_argument(
+        '--image-size',
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=('W', 'H'),
+        help='Optional resize; default: native resolution (no resize)',
+    )
     p.add_argument('--ascending-chain', action='store_true', help='Anchor shortest wavelength (default: longest)')
     p.add_argument('--max-sessions', type=int, default=None, help='Limit test sessions (debug)')
-    p.add_argument('--visualize', action='store_true', help='Save fake RGB for test sessions')
+    p.add_argument('--visualize', action='store_true', help='Save fake RGB compare images')
+    p.add_argument('--save-outputs', action='store_true', default=True,
+                   help='Save per-session bands/flows (default: on)')
+    p.add_argument('--no-save-outputs', action='store_false', dest='save_outputs',
+                   help='Skip saving band images and flow visualizations')
     p.add_argument('--metrics-csv', default=None, help='CSV path; default outputs/metrics_tables/seed_{seed}.csv')
     p.add_argument('--no-metrics-csv', action='store_true', help='Do not write comparison CSV')
     p.add_argument('--overwrite-csv-row', action='store_true', help='Replace existing method row in CSV')
@@ -312,7 +354,7 @@ def main():
         data_dir, args.train_ratio, args.seed, split_from,
     )
     descending = not args.ascending_chain
-    image_size = tuple(args.image_size)
+    image_size = tuple(args.image_size) if args.image_size else None
     spectral_path = Path(args.spectral_path)
     if not spectral_path.is_file():
         spectral_path = PROJECT_ROOT / args.spectral_path
@@ -335,6 +377,23 @@ def main():
         if not metrics_csv.is_absolute():
             metrics_csv = PROJECT_ROOT / metrics_csv
 
+    if not args.no_metrics_csv:
+        save_unregistered_metrics_report(
+            PROJECT_ROOT,
+            args.seed,
+            test_folders,
+            image_size,
+            args.max_sessions,
+        )
+        ensure_unregistered_row(
+            metrics_csv,
+            args.seed,
+            test_folders,
+            image_size=image_size,
+            max_sessions=args.max_sessions,
+            verbose=True,
+        )
+
     methods = list(CLASSICAL_METHODS) if args.method == 'all' else [args.method]
     run_dirs = []
     for method in methods:
@@ -349,6 +408,7 @@ def main():
                 args.max_sessions,
                 register_kwargs,
                 args.visualize,
+                args.save_outputs,
                 spectral_path,
                 manifest_src,
                 args.train_ratio,

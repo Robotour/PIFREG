@@ -27,12 +27,13 @@ import numpy as np
 import torch
 
 from src.python.experiments.experiment_recorder import save_rgb_outputs
+from src.python.experiments.session_outputs import save_session_registration_outputs
 from src.python.preprocessing import hsi_to_rgb
+from src.python.registration.classical_stack import anchor_index
 from src.python.voxelmorph.networks import VxmDense
 from src.python.voxelmorph.training import (
     _list_readable_band_files,
     _normalize_band,
-    register_raw_stack_with_chain_flows,
     register_stack_with_voxelmorph_chain,
     select_best_checkpoint,
 )
@@ -78,7 +79,7 @@ def visualize_test_sessions(
     run_dir=None,
     output_dir=None,
     checkpoint=None,
-    image_size=(512, 512),
+    image_size=None,
     device="cuda",
     num_sessions=6,
     session_indices=None,
@@ -145,7 +146,8 @@ def visualize_test_sessions(
     config_path = model_dir / "config.json"
     if config_path.is_file() and image_size is None:
         cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        image_size = tuple(cfg.get("image_size", [512, 512]))
+        sz = cfg.get("image_size")
+        image_size = tuple(sz) if sz else None
 
     if test_folders is None:
         test_folders = _load_test_folders(model_dir)
@@ -174,6 +176,16 @@ def visualize_test_sessions(
             device=device,
             descending=descending,
             smooth_flow_sigma=smooth_flow_sigma,
+        )
+
+        save_session_registration_outputs(
+            run_dir,
+            bands_raw,
+            bands_raw_after,
+            band_files,
+            chain_steps=chain_steps,
+            anchor_idx=anchor_index(len(band_files), descending=descending),
+            descending=descending,
         )
 
         rgb_before = hsi_to_rgb(bands_raw, spectral_data_path=str(spectral_path))
@@ -209,6 +221,9 @@ def visualize_test_sessions(
                 if k != "val"
             },
             "outputs": {
+                "bands_before": str(run_dir / "bands" / "before"),
+                "bands_after": str(run_dir / "bands" / "after"),
+                "flows": str(run_dir / "flows"),
                 "rgb_before": str(paths["before"]),
                 "rgb_after": str(paths["after"]),
                 "rgb_compare": str(paths["compare"]),
@@ -250,7 +265,14 @@ def parse_args():
     p.add_argument("--model-dir", type=str, default=None)
     p.add_argument("--output-dir", type=str, default=None)
     p.add_argument("--checkpoint", type=str, default=None, help="Override; default checkpoints/best.pt")
-    p.add_argument("--image-size", type=int, nargs=2, default=[512, 512], metavar=("W", "H"))
+    p.add_argument(
+        "--image-size",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("W", "H"),
+        help="Optional resize; default: native resolution (no resize)",
+    )
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--num-sessions", type=int, default=6, help="How many test sessions (ignored if --all-test-sessions)")
     p.add_argument("--all-test-sessions", action="store_true", help="Visualize every test session")
@@ -282,7 +304,7 @@ def main():
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         checkpoint=args.checkpoint,
-        image_size=tuple(args.image_size),
+        image_size=tuple(args.image_size) if args.image_size else None,
         device=args.device,
         num_sessions=args.num_sessions,
         session_indices=indices,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -48,11 +49,62 @@ def _metrics_to_row_values(summary: Dict[str, float]) -> Dict[str, float]:
     return {k: summary.get(k, '') for k in METRIC_KEYS}
 
 
+def format_image_size_label(image_size: Optional[tuple]) -> str:
+    if image_size is None:
+        return 'native'
+    return f'{image_size[0]},{image_size[1]}'
+
+
+def save_unregistered_metrics_report(
+    project_root: Path,
+    seed: int,
+    test_folders: Sequence,
+    image_size=None,
+    max_sessions: Optional[int] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Compute and save unregistered (before registration) metrics once per seed."""
+    from .session_outputs import print_metrics_summary
+
+    report_dir = project_root / 'outputs' / 'metrics_tables'
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f'seed_{seed}_unregistered.json'
+
+    if verbose:
+        print('\n' + '=' * 60, flush=True)
+        print('Unregistered metrics (before registration) on test set', flush=True)
+        print('=' * 60, flush=True)
+
+    unreg = evaluate_test_sessions_all_pairs(
+        test_folders,
+        image_size=image_size,
+        register_fn=None,
+        max_sessions=max_sessions,
+        verbose=verbose,
+    )
+    if verbose:
+        print_metrics_summary('Summary (before)', unreg['summary_before'])
+
+    payload = {
+        'seed': seed,
+        'image_size': list(image_size) if image_size else None,
+        'num_test_sessions': unreg['num_sessions'],
+        'summary_before': unreg['summary_before'],
+        'per_session': unreg['per_session'],
+        'metric_definition': unreg['metric_definition'],
+    }
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2)
+    if verbose:
+        print(f'Unregistered report: {report_path}', flush=True)
+    return unreg
+
+
 def ensure_unregistered_row(
     csv_path: Path,
     seed: int,
     test_folders: Sequence,
-    image_size=(512, 512),
+    image_size=None,
     max_sessions: Optional[int] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -85,7 +137,7 @@ def ensure_unregistered_row(
         'num_test_sessions': eval_result['num_sessions'],
         'num_bands_mean': f'{eval_result["num_bands_mean"]:.2f}',
         'num_pairs_mean': f'{eval_result["num_pairs_mean"]:.1f}',
-        'image_size': f'{image_size[0]},{image_size[1]}',
+        'image_size': format_image_size_label(image_size),
         'run_dir': '',
         'timestamp': datetime.now().isoformat(timespec='seconds'),
         'notes': 'mean over all band pairs per session, then mean over test sessions',
@@ -106,7 +158,7 @@ def append_method_row(
     seed: int,
     summary_after: Dict[str, float],
     test_folders: Sequence,
-    image_size=(512, 512),
+    image_size=None,
     run_dir: Optional[Path] = None,
     notes: str = '',
     max_sessions: Optional[int] = None,
@@ -134,7 +186,7 @@ def append_method_row(
         'num_test_sessions': len(test_folders) if max_sessions is None else min(max_sessions, len(test_folders)),
         'num_bands_mean': f'{num_bands_mean:.2f}' if num_bands_mean is not None else '',
         'num_pairs_mean': f'{num_pairs_mean:.1f}' if num_pairs_mean is not None else '',
-        'image_size': f'{image_size[0]},{image_size[1]}',
+        'image_size': format_image_size_label(image_size),
         'run_dir': str(run_dir.resolve()) if run_dir else '',
         'timestamp': datetime.now().isoformat(timespec='seconds'),
         'notes': notes,

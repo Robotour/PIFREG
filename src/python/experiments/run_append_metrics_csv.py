@@ -65,7 +65,14 @@ def parse_args():
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--data-dir', default='data/cut_images_all')
     p.add_argument('--train-ratio', type=float, default=0.7)
-    p.add_argument('--image-size', type=int, nargs=2, default=[512, 512], metavar=('W', 'H'))
+    p.add_argument(
+        '--image-size',
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=('W', 'H'),
+        help='Optional resize; default: native resolution (no resize)',
+    )
     p.add_argument('--metrics-csv', default=None)
     p.add_argument('--init-only', action='store_true', help='Only write unregistered row (row 1)')
     p.add_argument('--method', default=None, help='Method name for CSV row (required unless --init-only)')
@@ -77,7 +84,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    image_size = tuple(args.image_size)
+    image_size = tuple(args.image_size) if args.image_size else None
     csv_path = (
         Path(args.metrics_csv)
         if args.metrics_csv

@@ -42,6 +42,7 @@ def create_run_dir(
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / 'checkpoints').mkdir(exist_ok=True)
     (run_dir / 'visualizations').mkdir(exist_ok=True)
+    (run_dir / 'session_exports').mkdir(exist_ok=True)
     return run_dir
 
 
@@ -50,7 +51,7 @@ def prepare_data_split(
     run_dir: Path,
     train_ratio: float = 0.7,
     seed: int = 42,
-    image_size=(512, 512),
+    image_size=None,
 ) -> Dict[str, Any]:
     folders = discover_band_folders([data_root])
     train_folders, test_folders = split_folders_train_test(
@@ -123,7 +124,7 @@ def evaluate_run(
     data_bundle: Dict[str, Any],
     checkpoint: Path,
     device: str = 'cuda',
-    image_size=(512, 512),
+    image_size=None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
     method_name: str = 'voxelmorph',
@@ -186,7 +187,7 @@ def visualize_all_test_sessions(
     data_bundle: Dict[str, Any],
     project_root: Path,
     device: str = 'cuda',
-    image_size=(512, 512),
+    image_size=None,
     spectral_path: Optional[Path] = None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
@@ -217,7 +218,7 @@ def run_full_experiment(
     data_dir: str = 'data/cut_images_all',
     train_ratio: float = 0.7,
     seed: int = 42,
-    image_size=(512, 512),
+    image_size=None,
     train_kwargs: Optional[Dict[str, Any]] = None,
     chain_descending: bool = True,
     smooth_flow_sigma: float = 1.5,
@@ -243,7 +244,7 @@ def run_full_experiment(
         'run_dir': str(run_dir.resolve()),
         'train_ratio': train_ratio,
         'seed': seed,
-        'image_size': list(image_size),
+        'image_size': list(image_size) if image_size is not None else None,
         'chain_descending': chain_descending,
         'smooth_flow_sigma': smooth_flow_sigma,
         'num_sessions': len(data_bundle['folders']),
@@ -264,6 +265,18 @@ def run_full_experiment(
 
     best_path = Path(best_path)
     csv_method_name = f'voxelmorph_{method}'
+
+    from src.python.experiments.metrics_csv import save_unregistered_metrics_report
+    from src.python.experiments.session_outputs import print_metrics_summary
+
+    save_unregistered_metrics_report(
+        project_root,
+        seed,
+        data_bundle['test_folders'],
+        image_size=image_size,
+        verbose=True,
+    )
+
     metrics = evaluate_run(
         run_dir,
         data_bundle,
@@ -274,6 +287,12 @@ def run_full_experiment(
         smooth_flow_sigma=smooth_flow_sigma,
         method_name=csv_method_name,
     )
+    all_pairs = metrics['all_pairs_eval']
+    print('\n--- All-pairs registration metrics on test set ---', flush=True)
+    print_metrics_summary('Before (unregistered)', all_pairs['summary_before'])
+    print_metrics_summary('After  (registered)  ', all_pairs['summary_after'])
+    print_metrics_summary('Delta (after-before) ', all_pairs['summary_delta'])
+
     if write_metrics_csv:
         from src.python.experiments.metrics_csv import (
             append_method_row,

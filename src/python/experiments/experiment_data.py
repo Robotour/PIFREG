@@ -51,7 +51,7 @@ def sort_band_files(folder: Path) -> List[Path]:
 
 def load_hsi_stack(
     folder,
-    image_size: Optional[Tuple[int, int]] = (512, 512),
+    image_size: Optional[Tuple[int, int]] = None,
     return_wavelengths: bool = False,
 ):
     """
@@ -85,7 +85,7 @@ def load_pair_images(
     moving_path,
     project_root: Path,
     data_dir: Path,
-    image_size: Optional[Tuple[int, int]] = (512, 512),
+    image_size: Optional[Tuple[int, int]] = None,
 ):
     """加载 pairwise 图像：归一化版 + 原图强度。"""
     fixed = cv2.imread(str(resolve_image_path(fixed_path, project_root, data_dir)), cv2.IMREAD_GRAYSCALE)

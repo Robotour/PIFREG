@@ -36,6 +36,7 @@ def register_elastix(
     epochs=20,
     spacinginvoxels=20,
     moving_raw=None,
+    return_field=False,
 ):
     """
     Elastix传统配准方法
@@ -49,7 +50,12 @@ def register_elastix(
 
     _, field = pyelastix.register(moving_image, fixed_image, params)
     warp_target = moving_raw if moving_raw is not None else moving_image
-    return _warp_with_elastix_field(warp_target, field)
+    warped = _warp_with_elastix_field(warp_target, field)
+    if return_field:
+        flow = np.stack([np.asarray(field[0], dtype=np.float32),
+                         np.asarray(field[1], dtype=np.float32)], axis=0)
+        return warped, flow
+    return warped
 
 
 def register_voxelmorph(*args, **kwargs):
@@ -113,6 +119,7 @@ def register_elastix_chain(
     spacinginvoxels=20,
     descending=True,
     raw_list=None,
+    return_steps=False,
 ):
     """
     Elastix 链式 pairwise 配准（与 VoxelMorph 推理链一致）
@@ -126,16 +133,30 @@ def register_elastix_chain(
         for b in (raw_list if raw_list is not None else img_list)
     ]
     if len(eq_list) < 2:
-        return raw_list
-    for fixed_idx, moving_idx in _chain_pair_indices(len(eq_list), descending=descending):
-        raw_list[moving_idx] = register_elastix(
+        return (raw_list, []) if return_steps else raw_list
+
+    steps = []
+    for step_i, (fixed_idx, moving_idx) in enumerate(
+        _chain_pair_indices(len(eq_list), descending=descending), start=1,
+    ):
+        warped, flow = register_elastix(
             eq_list[fixed_idx],
             eq_list[moving_idx],
             epochs=epochs,
             spacinginvoxels=spacinginvoxels,
             moving_raw=raw_list[moving_idx],
+            return_field=True,
         )
+        raw_list[moving_idx] = warped
         eq_list[moving_idx] = refresh_histogram_equalized(raw_list[moving_idx])
+        steps.append({
+            'step': step_i,
+            'fixed_idx': fixed_idx,
+            'moving_idx': moving_idx,
+            'flow': flow,
+        })
+    if return_steps:
+        return raw_list, steps
     return raw_list
 
 

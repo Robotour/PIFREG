@@ -48,7 +48,7 @@ def compute_stack_all_pairs_mean(bands: Sequence[np.ndarray]) -> Dict[str, float
 
 def evaluate_test_sessions_all_pairs(
     test_folders: Sequence,
-    image_size=(512, 512),
+    image_size=None,
     register_fn: Optional[Callable[[List[np.ndarray], List[np.ndarray]], List[np.ndarray]]] = None,
     max_sessions: Optional[int] = None,
     verbose: bool = True,
